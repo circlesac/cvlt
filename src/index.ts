@@ -2,6 +2,7 @@
 
 import { defineCommand, runMain } from "citty"
 import { api, resolveVault, resolveItem, getConfig, setOverrides } from "./api"
+import { checkForUpdate } from "./lib/update-check.ts"
 import { createReadStream, readFileSync } from "node:fs"
 import { writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
@@ -852,5 +853,6 @@ export const main = defineCommand({
 })
 
 if (import.meta.main) {
+  await checkForUpdate()
   runMain(main)
 }
