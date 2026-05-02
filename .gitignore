@@ -3,3 +3,5 @@ dist/
 *.log
 bin/native/
 *.bun-build
+/vlt
+bun.lock
