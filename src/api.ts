@@ -2,8 +2,9 @@
  * Vault Connect API client.
  *
  * Config resolution (priority):
- * 1. OP_CONNECT_HOST + OP_CONNECT_TOKEN (op CLI compat)
- * 2. crcl config (~/.config/crcl/config + credentials)
+ * 1. OP_CONNECT_HOST + OP_CONNECT_TOKEN (op CLI compat, manual token)
+ * 2. OP_CONNECT_HOST + GitHub Actions OIDC env vars (CI, no stored secret)
+ * 3. crcl config (~/.config/crcl/config + credentials)
  *
  * CLI flags --profile and --org override crcl config values.
  */
@@ -15,6 +16,8 @@ import { execSync } from "node:child_process"
 
 const DEFAULT_VAULT_HOST = "https://vault.circles.ac"
 const DEV_VAULT_HOST = "https://vault.crcl.es"
+
+const OIDC_TOKEN_LEEWAY_MS = 60_000 // refresh 1 min before exp
 
 type IniData = Record<string, Record<string, string>>
 
@@ -69,6 +72,67 @@ function getCrclToken(profile: string): string | null {
   }
 }
 
+/** Detects GitHub Actions OIDC environment. Both vars are present together
+ * when a workflow has `permissions: id-token: write`. */
+export function hasGithubOidcEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !!(env.ACTIONS_ID_TOKEN_REQUEST_URL && env.ACTIONS_ID_TOKEN_REQUEST_TOKEN)
+}
+
+let _oidcCache: { audience: string; token: string; expMs: number } | null = null
+
+/** Reset the OIDC token cache. Exported for tests. */
+export function _resetOidcCache() {
+  _oidcCache = null
+}
+
+function parseJwtExpMs(token: string): number {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(token.split(".")[1]!, "base64url").toString("utf8")
+    ) as { exp?: number }
+    return payload.exp ? payload.exp * 1000 : 0
+  } catch {
+    return 0
+  }
+}
+
+/** Fetch a GitHub Actions OIDC ID token for the given audience.
+ * Returns null when not running inside a GitHub Actions workflow, or when
+ * the OIDC request fails (caller falls back to other auth methods). */
+export async function fetchGithubOidcToken(
+  audience: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<string | null> {
+  const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL
+  const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  if (!requestUrl || !requestToken) return null
+
+  if (_oidcCache && _oidcCache.audience === audience && Date.now() < _oidcCache.expMs - OIDC_TOKEN_LEEWAY_MS) {
+    return _oidcCache.token
+  }
+
+  // GitHub's OIDC endpoint already carries query params; append audience.
+  const sep = requestUrl.includes("?") ? "&" : "?"
+  const fullUrl = `${requestUrl}${sep}audience=${encodeURIComponent(audience)}`
+
+  try {
+    const res = await fetch(fullUrl, {
+      headers: { Authorization: `Bearer ${requestToken}` },
+    })
+    if (!res.ok) {
+      console.error(`[ERROR] GitHub OIDC token request failed: ${res.status}`)
+      return null
+    }
+    const data = (await res.json()) as { value?: string }
+    if (!data.value) return null
+    _oidcCache = { audience, token: data.value, expMs: parseJwtExpMs(data.value) }
+    return data.value
+  } catch (e) {
+    console.error(`[ERROR] GitHub OIDC token fetch error: ${(e as Error).message}`)
+    return null
+  }
+}
+
 // Global overrides set by CLI flags
 let _profileOverride: string | undefined
 let _orgOverride: string | undefined
@@ -78,8 +142,8 @@ export function setOverrides(opts: { profile?: string; org?: string }) {
   _orgOverride = opts.org
 }
 
-export function getConfig() {
-  // 1. OP_CONNECT_* env vars (op CLI compat)
+export async function getConfig() {
+  // 1. OP_CONNECT_* env vars (op CLI compat, manual token)
   if (process.env.OP_CONNECT_HOST && process.env.OP_CONNECT_TOKEN) {
     const url = new URL(process.env.OP_CONNECT_HOST)
     const org = url.pathname.replace(/^\//, "").replace(/\/$/, "")
@@ -87,7 +151,23 @@ export function getConfig() {
     return { baseUrl, token: process.env.OP_CONNECT_TOKEN, org }
   }
 
-  // 2. crcl config
+  // 2. OP_CONNECT_HOST + GitHub Actions OIDC env vars (CI)
+  // No stored secret: the workflow has `id-token: write` permission and the
+  // runner mints a short-lived JWT scoped to the configured audience.
+  if (process.env.OP_CONNECT_HOST && hasGithubOidcEnv()) {
+    const url = new URL(process.env.OP_CONNECT_HOST)
+    const org = url.pathname.replace(/^\//, "").replace(/\/$/, "")
+    const baseUrl = `${url.origin}/${org}`
+    const audience = process.env.OP_CONNECT_AUDIENCE || baseUrl
+    const oidcToken = await fetchGithubOidcToken(audience)
+    if (oidcToken) {
+      return { baseUrl, token: oidcToken, org }
+    }
+    console.error("[ERROR] GitHub OIDC env vars set but token fetch failed")
+    process.exit(1)
+  }
+
+  // 3. crcl config
   const profile = _profileOverride || process.env.CRCL_PROFILE || "default"
   const config = readCrclConfig()
   const section = config[profile] || {}
@@ -136,7 +216,7 @@ export async function api<T = unknown>(
   path: string,
   opts: { method?: string; body?: unknown } = {}
 ): Promise<T> {
-  const { baseUrl, token } = getConfig()
+  const { baseUrl, token } = await getConfig()
   const url = `${baseUrl}${path}`
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
@@ -192,7 +272,7 @@ export async function resolveItem(
   )
   if (items.length > 0) return items[0]!.id
 
-  const { baseUrl, token } = getConfig()
+  const { baseUrl, token } = await getConfig()
   const res = await fetch(`${baseUrl}/v1/vaults/${vaultId}/items/${nameOrId}`, {
     headers: { Authorization: `Bearer ${token}` },
   })

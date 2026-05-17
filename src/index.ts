@@ -730,7 +730,7 @@ const documentCreateCommand = defineCommand({
 
     // Upload file
     const fileContent = readFileSync(args.file)
-    const { baseUrl, token } = getConfig()
+    const { baseUrl, token } = await getConfig()
     const form = new FormData()
     form.append("file", new Blob([fileContent]), args.file.split("/").pop() || "file")
     const res = await fetch(`${baseUrl}/v1/vaults/${vaultId}/items/${item.id}/files`, {
@@ -790,7 +790,7 @@ const documentGetCommand = defineCommand({
       process.exit(1)
     }
     const file = fileList[0]!
-    const { baseUrl, token } = getConfig()
+    const { baseUrl, token } = await getConfig()
     const res = await fetch(`${baseUrl}/${file.content_path}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -820,10 +820,174 @@ const documentCommand = defineCommand({
 // whoami
 const whoamiCommand = defineCommand({
   meta: { name: "whoami", description: "Show connection info" },
-  run() {
-    const { baseUrl, org } = getConfig()
+  async run() {
+    const { baseUrl, org } = await getConfig()
     console.log(`Host: ${baseUrl}`)
     console.log(`Org:  ${org}`)
+  },
+})
+
+// ── OIDC grants ─────────────────────────────────────────────────────────────
+
+type Grant = {
+  id: string
+  provider: string
+  repository: string
+  environment?: string
+  ref?: string
+  vault_id?: string
+  role: "read" | "write"
+  created_at: string
+  updated_at: string
+}
+
+function printGrantsTable(grants: Grant[]) {
+  if (grants.length === 0) {
+    console.log("(no grants)")
+    return
+  }
+  console.log(
+    `${"ID".padEnd(28)} ${"REPOSITORY".padEnd(32)} ${"ENV".padEnd(12)} ${"REF".padEnd(20)} ${"VAULT".padEnd(28)} ROLE`
+  )
+  console.log("─".repeat(130))
+  for (const g of grants) {
+    console.log(
+      `${g.id.padEnd(28)} ${g.repository.padEnd(32)} ${(g.environment ?? "—").padEnd(12)} ${(g.ref ?? "—").padEnd(20)} ${(g.vault_id ?? "—").padEnd(28)} ${g.role}`
+    )
+  }
+}
+
+// oidc grant list
+const oidcGrantListCommand = defineCommand({
+  meta: { name: "list", description: "List OIDC grants in this org" },
+  args: { ...formatFlag },
+  async run({ args }) {
+    const grants = await api<Grant[]>("/v1/oidc/grants")
+    if (args.format === "json") {
+      console.log(JSON.stringify(grants, null, 2))
+    } else {
+      printGrantsTable(grants)
+    }
+  },
+})
+
+// oidc grant get
+const oidcGrantGetCommand = defineCommand({
+  meta: { name: "get", description: "Get one OIDC grant by ID" },
+  args: {
+    id: { type: "positional" as const, description: "Grant ID", required: true },
+    ...formatFlag,
+  },
+  async run({ args }) {
+    const grant = await api<Grant>(`/v1/oidc/grants/${args.id}`)
+    if (args.format === "json") {
+      console.log(JSON.stringify(grant, null, 2))
+    } else {
+      console.log(`ID:         ${grant.id}`)
+      console.log(`Repository: ${grant.repository}`)
+      if (grant.environment) console.log(`Env:        ${grant.environment}`)
+      if (grant.ref) console.log(`Ref:        ${grant.ref}`)
+      if (grant.vault_id) console.log(`Vault:      ${grant.vault_id}`)
+      console.log(`Role:       ${grant.role}`)
+      console.log(`Created:    ${grant.created_at}`)
+      console.log(`Updated:    ${grant.updated_at}`)
+    }
+  },
+})
+
+const grantBodyFlags = {
+  role: { type: "string" as const, description: "read | write (default: read)" },
+  env: { type: "string" as const, description: "Optional environment (e.g. production)" },
+  ref: { type: "string" as const, description: "Optional ref (e.g. refs/heads/main)" },
+  vault: { type: "string" as const, description: "Optional vault name or ID; omit for org-wide grant" },
+  ...formatFlag,
+}
+
+async function resolveOptionalVault(name: string | undefined): Promise<string | undefined> {
+  if (!name) return undefined
+  return resolveVault(name)
+}
+
+// oidc grant create
+const oidcGrantCreateCommand = defineCommand({
+  meta: { name: "create", description: "Create an OIDC grant for a GitHub repository" },
+  args: {
+    repository: {
+      type: "positional" as const,
+      description: "GitHub repository in 'owner/repo' format",
+      required: true,
+    },
+    ...grantBodyFlags,
+  },
+  async run({ args }) {
+    const body: Record<string, unknown> = { repository: args.repository }
+    if (args.role) body.role = args.role
+    if (args.env) body.environment = args.env
+    if (args.ref) body.ref = args.ref
+    if (args.vault) body.vault_id = await resolveOptionalVault(args.vault)
+    const grant = await api<Grant>("/v1/oidc/grants", { method: "POST", body })
+    if (args.format === "json") {
+      console.log(JSON.stringify(grant, null, 2))
+    } else {
+      console.log(`Created grant ${grant.id} for ${grant.repository} (${grant.role})`)
+    }
+  },
+})
+
+// oidc grant edit
+const oidcGrantEditCommand = defineCommand({
+  meta: { name: "edit", description: "Update an OIDC grant. Pass 'null' to clear an optional field." },
+  args: {
+    id: { type: "positional" as const, description: "Grant ID", required: true },
+    repository: { type: "string" as const, description: "New repository value" },
+    ...grantBodyFlags,
+  },
+  async run({ args }) {
+    const body: Record<string, unknown> = {}
+    if (args.repository) body.repository = args.repository
+    if (args.role) body.role = args.role
+    // For env/ref/vault, "null" string sentinel clears the field
+    if (args.env !== undefined) body.environment = args.env === "null" ? null : args.env
+    if (args.ref !== undefined) body.ref = args.ref === "null" ? null : args.ref
+    if (args.vault !== undefined) {
+      body.vault_id = args.vault === "null" ? null : await resolveOptionalVault(args.vault)
+    }
+    const grant = await api<Grant>(`/v1/oidc/grants/${args.id}`, { method: "PUT", body })
+    if (args.format === "json") {
+      console.log(JSON.stringify(grant, null, 2))
+    } else {
+      console.log(`Updated grant ${grant.id}`)
+    }
+  },
+})
+
+// oidc grant delete
+const oidcGrantDeleteCommand = defineCommand({
+  meta: { name: "delete", description: "Revoke an OIDC grant" },
+  args: {
+    id: { type: "positional" as const, description: "Grant ID", required: true },
+  },
+  async run({ args }) {
+    await api(`/v1/oidc/grants/${args.id}`, { method: "DELETE" })
+    console.log(`Deleted grant ${args.id}`)
+  },
+})
+
+const oidcGrantCommand = defineCommand({
+  meta: { name: "grant", description: "Manage OIDC grants" },
+  subCommands: {
+    list: oidcGrantListCommand,
+    get: oidcGrantGetCommand,
+    create: oidcGrantCreateCommand,
+    edit: oidcGrantEditCommand,
+    delete: oidcGrantDeleteCommand,
+  },
+})
+
+const oidcCommand = defineCommand({
+  meta: { name: "oidc", description: "OIDC integration commands" },
+  subCommands: {
+    grant: oidcGrantCommand,
   },
 })
 
@@ -848,6 +1012,7 @@ export const main = defineCommand({
     vault: vaultCommand,
     item: itemCommand,
     document: documentCommand,
+    oidc: oidcCommand,
     whoami: whoamiCommand,
   },
 })
