@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
 import { defineCommand, runMain } from "citty"
-import { api, resolveVault, resolveItem, getConfig, setOverrides } from "./api"
+import { api, secretsApi, resolveVault, resolveItem, getConfig, setOverrides } from "./api"
+import { parseRef, injectTemplate, buildRunEnv } from "./refs"
 import { checkForUpdate } from "./lib/update-check.ts"
 import { createReadStream, readFileSync } from "node:fs"
 import { writeFileSync } from "node:fs"
@@ -32,21 +33,25 @@ type Vault = {
   updated_at: string
 }
 
-// ── Secret Reference Parser ─────────────────────────────────────────────────
-// Format: op://<vault>/<item>/<field>
+// ── Secret reading — two address surfaces (op:// + vlt://) ──────────────────
 
-function parseSecretRef(ref: string): { vault: string; item: string; field: string } {
-  const match = ref.match(/^op:\/\/([^/]+)\/([^/]+)\/([^/?]+)/)
-  if (!match) {
+async function readSecret(ref: string, opts: { personal?: boolean } = {}): Promise<string> {
+  const parsed = parseRef(ref)
+  if (!parsed.ok) {
     console.error(`[ERROR] Invalid secret reference: ${ref}`)
-    console.error("Expected format: op://<vault>/<item>/<field>")
+    console.error(parsed.message)
     process.exit(1)
   }
-  return { vault: match[1]!, item: match[2]!, field: match[3]! }
-}
 
-async function readSecret(ref: string): Promise<string> {
-  const { vault, item, field } = parseSecretRef(ref)
+  if (parsed.ref.scheme === "vlt") {
+    const res = await secretsApi<{ value: string }>(
+      `/v1/secrets/value?ref=${encodeURIComponent(ref)}`,
+      { personal: opts.personal }
+    )
+    return res.value
+  }
+
+  const { vault, item, field } = parsed.ref
   const vaultId = await resolveVault(vault)
   const itemId = await resolveItem(vaultId, item)
   const fullItem = await api<Item>(`/v1/vaults/${vaultId}/items/${itemId}`)
@@ -134,13 +139,8 @@ const injectCommand = defineCommand({
       template = Buffer.concat(chunks).toString("utf-8")
     }
 
-    // Replace all {{op://...}} references
-    const refs = [...template.matchAll(/\{\{(op:\/\/[^}]+)\}\}/g)]
-    let result = template
-    for (const match of refs) {
-      const value = await readSecret(match[1]!)
-      result = result.replace(match[0]!, value)
-    }
+    // Replace all {{op://...}} / {{vlt://...}} references
+    const result = await injectTemplate(template, (ref) => readSecret(ref))
 
     if (args["out-file"]) {
       writeFileSync(args["out-file"], result, { mode: 0o600 })
@@ -154,9 +154,10 @@ const injectCommand = defineCommand({
 const runCommand = defineCommand({
   meta: { name: "run", description: "Run a command with secrets injected as env vars" },
   args: {
+    "env-file": { type: "string" as const, description: "Env file with KEY=<secret reference> lines (op run idiom)" },
     "no-masking": { type: "boolean" as const, description: "Don't mask secrets in output" },
   },
-  async run({ rawArgs }) {
+  async run({ args, rawArgs }) {
     // Find -- separator
     const dashIdx = rawArgs.indexOf("--")
     if (dashIdx < 0 || dashIdx === rawArgs.length - 1) {
@@ -165,13 +166,9 @@ const runCommand = defineCommand({
     }
     const cmd = rawArgs.slice(dashIdx + 1)
 
-    // Scan env vars for op:// references
-    const env = { ...process.env }
-    for (const [key, val] of Object.entries(env)) {
-      if (val?.startsWith("op://")) {
-        env[key] = await readSecret(val)
-      }
-    }
+    // Resolve op:// and vlt:// references from --env-file entries and env vars
+    const envFileContent = args["env-file"] ? readFileSync(args["env-file"], "utf-8") : null
+    const env = await buildRunEnv(process.env, envFileContent, (ref) => readSecret(ref))
 
     const result = spawnSync(cmd[0]!, cmd.slice(1), { stdio: "inherit", env })
     process.exit(result.status ?? 1)
@@ -817,6 +814,142 @@ const documentCommand = defineCommand({
   },
 })
 
+// ── Flat secrets (vlt:// surface) ───────────────────────────────────────────
+
+type SecretMeta = {
+  id: string
+  ref: string
+  provider: string
+  owner: string
+  repo: string | null
+  name: string
+  created_at: string
+  updated_at: string
+}
+
+const personalFlag = {
+  personal: { type: "boolean" as const, description: "Use the personal namespace instead of the configured org" },
+}
+
+function requireVltRef(raw: string): string {
+  const parsed = parseRef(raw)
+  if (!parsed.ok || parsed.ref.scheme !== "vlt") {
+    console.error(`[ERROR] Invalid vlt:// reference: ${raw}`)
+    if (!parsed.ok) console.error(parsed.message)
+    else console.error("This command takes vlt:// references (op:// items are managed via 'vlt item')")
+    process.exit(1)
+  }
+  return raw
+}
+
+const secretSetCommand = defineCommand({
+  meta: { name: "set", description: "Create or update a flat secret" },
+  args: {
+    reference: { type: "positional" as const, description: "vlt://<provider>/<owner>[/<repo>]#<NAME>", required: true },
+    value: { type: "positional" as const, description: "Secret value (omit to read from stdin)", required: false },
+    ...personalFlag,
+  },
+  async run({ args }) {
+    const ref = requireVltRef(args.reference)
+    let value = args.value
+    if (value === undefined) {
+      const chunks: Buffer[] = []
+      for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
+      value = Buffer.concat(chunks).toString("utf-8").replace(/\n$/, "")
+    }
+    const res = await secretsApi<{ id: string; created?: boolean; updated?: boolean }>("/v1/secrets", {
+      method: "PUT",
+      body: { ref, value },
+      personal: args.personal,
+    })
+    console.log(`${res.created ? "Created" : "Updated"} ${ref}`)
+  },
+})
+
+const secretGetCommand = defineCommand({
+  meta: { name: "get", description: "Read a flat secret value" },
+  args: {
+    reference: { type: "positional" as const, description: "vlt://<provider>/<owner>[/<repo>]#<NAME>", required: true },
+    "no-newline": { type: "boolean" as const, alias: "n", description: "No trailing newline" },
+    ...personalFlag,
+  },
+  async run({ args }) {
+    const ref = requireVltRef(args.reference)
+    const value = await readSecret(ref, { personal: args.personal })
+    if (args["no-newline"]) process.stdout.write(value)
+    else console.log(value)
+  },
+})
+
+const secretListCommand = defineCommand({
+  meta: { name: "list", description: "List flat secrets (metadata only)" },
+  args: { ...formatFlag, ...personalFlag },
+  async run({ args }) {
+    const res = await secretsApi<{ secrets: SecretMeta[] }>("/v1/secrets", { personal: args.personal })
+    if (args.format === "json") {
+      console.log(JSON.stringify(res.secrets, null, 2))
+      return
+    }
+    if (res.secrets.length === 0) {
+      console.log("(no secrets)")
+      return
+    }
+    console.log(`${"REF".padEnd(60)} UPDATED`)
+    console.log("─".repeat(80))
+    for (const s of res.secrets) {
+      console.log(`${s.ref.padEnd(60)} ${s.updated_at}`)
+    }
+  },
+})
+
+const secretDeleteCommand = defineCommand({
+  meta: { name: "delete", description: "Delete a flat secret" },
+  args: {
+    reference: { type: "positional" as const, description: "vlt://<provider>/<owner>[/<repo>]#<NAME>", required: true },
+    ...personalFlag,
+  },
+  async run({ args }) {
+    const ref = requireVltRef(args.reference)
+    await secretsApi(`/v1/secrets?ref=${encodeURIComponent(ref)}`, {
+      method: "DELETE",
+      personal: args.personal,
+    })
+    console.log(`Deleted ${ref}`)
+  },
+})
+
+const secretResolveCommand = defineCommand({
+  meta: { name: "resolve", description: "Resolve a secret by name (project > global). CI identity implies the coordinate." },
+  args: {
+    name: { type: "positional" as const, description: "Secret NAME", required: true },
+    owner: { type: "string" as const, description: "Owner (required outside CI)" },
+    repo: { type: "string" as const, description: "Repo for project scope (optional)" },
+    "no-newline": { type: "boolean" as const, alias: "n", description: "No trailing newline" },
+    ...personalFlag,
+  },
+  async run({ args }) {
+    const params = new URLSearchParams({ name: args.name })
+    if (args.owner) params.set("owner", args.owner)
+    if (args.repo) params.set("repo", args.repo)
+    const res = await secretsApi<{ value: string }>(`/v1/secrets/resolve?${params}`, {
+      personal: args.personal,
+    })
+    if (args["no-newline"]) process.stdout.write(res.value)
+    else console.log(res.value)
+  },
+})
+
+const secretCommand = defineCommand({
+  meta: { name: "secret", description: "Manage flat secrets (vlt:// surface)" },
+  subCommands: {
+    set: secretSetCommand,
+    get: secretGetCommand,
+    list: secretListCommand,
+    delete: secretDeleteCommand,
+    resolve: secretResolveCommand,
+  },
+})
+
 // whoami
 const whoamiCommand = defineCommand({
   meta: { name: "whoami", description: "Show connection info" },
@@ -1009,6 +1142,7 @@ export const main = defineCommand({
     read: readCommand,
     inject: injectCommand,
     run: runCommand,
+    secret: secretCommand,
     vault: vaultCommand,
     item: itemCommand,
     document: documentCommand,

@@ -142,7 +142,8 @@ export function setOverrides(opts: { profile?: string; org?: string }) {
   _orgOverride = opts.org
 }
 
-export async function getConfig() {
+export async function getConfig(opts: { requireOrg?: boolean } = {}) {
+  const requireOrg = opts.requireOrg !== false
   // 1. OP_CONNECT_* env vars (op CLI compat, manual token)
   if (process.env.OP_CONNECT_HOST && process.env.OP_CONNECT_TOKEN) {
     const url = new URL(process.env.OP_CONNECT_HOST)
@@ -173,7 +174,7 @@ export async function getConfig() {
   const section = config[profile] || {}
 
   const org = _orgOverride || process.env.CRCL_ORG || section.org
-  if (!org) {
+  if (!org && requireOrg) {
     console.error("Error: No org configured. Set --org, CRCL_ORG, or run 'crcl orgs switch <slug>'")
     process.exit(1)
   }
@@ -181,7 +182,8 @@ export async function getConfig() {
   // Determine vault host based on profile
   const isDevProfile = section.api_url?.includes("-dev") || section.auth_url?.includes("-dev")
   const host = isDevProfile ? DEV_VAULT_HOST : DEFAULT_VAULT_HOST
-  const baseUrl = `${host}/${org}`
+  // No org → personal namespace base (org slug never appears in the path)
+  const baseUrl = org ? `${host}/${org}` : host
 
   // Get token (try cached credentials first, then crcl auth token)
   const creds = readCrclCredentials()
@@ -212,12 +214,41 @@ export async function getConfig() {
   return { baseUrl, token, org }
 }
 
+/** Config for the flat secrets API (vlt:// surface). Unlike getConfig, the
+ * org is optional: no org → personal namespace (base URL without org path,
+ * identity comes from the JWT — RFC #6 lock #2/#5). Pass personal=true to
+ * force the personal namespace even when an org is configured. */
+export async function getSecretsConfig(opts: { personal?: boolean } = {}) {
+  // Org is optional here: no org configured → personal namespace (lock #2).
+  const cfg = await getConfig({ requireOrg: false })
+  if (opts.personal || !cfg.org) {
+    // Personal namespace — host only, the org slug never appears in the path.
+    return { baseUrl: new URL(cfg.baseUrl).origin, token: cfg.token, org: null }
+  }
+  return { baseUrl: cfg.baseUrl, token: cfg.token, org: cfg.org }
+}
+
+export async function secretsApi<T = unknown>(
+  path: string,
+  opts: { method?: string; body?: unknown; personal?: boolean } = {}
+): Promise<T> {
+  const { baseUrl, token } = await getSecretsConfig({ personal: opts.personal })
+  return request<T>(`${baseUrl}${path}`, token, opts)
+}
+
 export async function api<T = unknown>(
   path: string,
   opts: { method?: string; body?: unknown } = {}
 ): Promise<T> {
   const { baseUrl, token } = await getConfig()
-  const url = `${baseUrl}${path}`
+  return request<T>(`${baseUrl}${path}`, token, opts)
+}
+
+async function request<T = unknown>(
+  url: string,
+  token: string,
+  opts: { method?: string; body?: unknown } = {}
+): Promise<T> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
   }
