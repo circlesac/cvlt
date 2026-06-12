@@ -2,7 +2,12 @@
 
 [![npm](https://img.shields.io/npm/v/@circlesac/vlt-cli.svg)](https://www.npmjs.com/package/@circlesac/vlt-cli)
 
-`vlt` is the official CLI for [Circles Vault](https://github.com/circlesac/vault) — a 1Password Connect-compatible secrets manager on Cloudflare Workers. It speaks the same `op://<vault>/<item>/<field>` secret reference syntax as 1Password's `op` CLI, so most workflows that use `op read`, `op inject`, or `op run` work unchanged by setting `OP_CONNECT_HOST`.
+`vlt` is the official CLI for [Circles Vault](https://github.com/circlesac/vault) — a secrets manager on Cloudflare Workers with two parallel address surfaces:
+
+- **`op://<vault>/<item>/<field>`** — 1Password Connect-compatible. Most workflows that use `op read`, `op inject`, or `op run` work unchanged by setting `OP_CONNECT_HOST`.
+- **`vlt://<provider>/<owner>[/<repo>]#<NAME>`** — flat GitHub-Secrets-style key→value secrets, addressed by GitHub coordinates. The repo segment selects the scope: present → project secret, absent → owner-global. Designed to replace GitHub Actions secrets (the coordinate is identical to the OIDC `repository` claim).
+
+`vlt read`, `vlt inject`, and `vlt run` accept both schemes anywhere a reference appears.
 
 ## Install
 
@@ -55,9 +60,19 @@ cat template.env | vlt inject > .env
 
 ```bash
 DB_PASS="op://my-vault/db-credentials/password" vlt run -- ./deploy.sh
+
+# op run idiom: keep references in a committed env file (references are not secrets)
+vlt run --env-file=.vlt.env -- ./deploy.sh
 ```
 
-`vlt run` scans the process env for `op://` references and replaces them with the actual secret values before exec'ing the command.
+```bash
+# .vlt.env — safe to commit; values are fetched at runtime
+DB_PASSWORD=vlt://github.com/acme/api#DB_PASSWORD
+OPENAI_KEY=vlt://github.com/acme#OPENAI_KEY
+LEGACY_PASS=op://my-vault/db-credentials/password
+```
+
+`vlt run` resolves `op://` / `vlt://` references found in `--env-file` entries and the process env, then exec's the command with the actual values.
 
 ### Manage vaults
 
@@ -85,6 +100,34 @@ vlt item move "DB" --current-vault staging --destination-vault prod-secrets
 vlt document create ./cert.pem --vault prod-secrets --title "TLS Cert"
 vlt document list --vault prod-secrets
 vlt document get "TLS Cert" --vault prod-secrets -o ./cert.pem
+```
+
+### Flat secrets (vlt://)
+
+Flat key→value secrets addressed by GitHub coordinates — separate from the op:// vault/item store. `vlt://github.com/<owner>#<NAME>` is owner-global, `vlt://github.com/<owner>/<repo>#<NAME>` is project-scoped; lookups resolve `project > global`. NAME charset is GitHub-isomorphic (`[A-Z0-9_]`, no digit start, no `GITHUB_` prefix); there is no escaping — anything outside the charset is rejected.
+
+```bash
+# Create / update (value from arg or stdin)
+vlt secret set "vlt://github.com/acme/api#DB_PASSWORD" "s3cret"
+echo -n "s3cret" | vlt secret set "vlt://github.com/acme#OPENAI_KEY"
+
+# Read
+vlt secret get "vlt://github.com/acme/api#DB_PASSWORD"
+
+# Resolve by name with project > global precedence
+vlt secret resolve DB_PASSWORD --owner acme --repo api   # humans pass the coordinate
+vlt secret resolve DB_PASSWORD                            # CI: coordinate implied by OIDC identity
+
+# List (metadata only — values are never listed) / delete
+vlt secret list
+vlt secret delete "vlt://github.com/acme/api#DB_PASSWORD"
+```
+
+Secrets belong to the configured org by default. `--personal` (or having no org configured) targets your personal account namespace instead — same scopes, addressed identically, isolated per user:
+
+```bash
+vlt secret set --personal "vlt://github.com/ygpark80/dotfiles#TOKEN" "..."
+vlt secret list --personal
 ```
 
 ### OIDC grants (operator-only)
@@ -131,6 +174,38 @@ jobs:
 ```
 
 `vlt` detects the runner's `ACTIONS_ID_TOKEN_REQUEST_URL` / `_TOKEN` env vars, mints a GitHub OIDC token with the right audience, and sends it to Vault. The server verifies GitHub's signature, matches the claims (`repository`, `environment`, `ref`) against the grant ACL, and serves the request.
+
+For vlt:// secrets the grant's `repository` doubles as the coordinate: a granted workflow can read its own project secrets plus that owner's globals — no other coordinate, regardless of what it asks for.
+
+### Composite action
+
+The repo ships a composite action that installs `vlt` and sets the endpoint:
+
+```yaml
+permissions:
+  id-token: write
+  contents: read
+
+steps:
+  - uses: actions/checkout@v4
+  - uses: circlesac/vlt-cli/action@main
+    with:
+      host: https://vault.circles.ac/<your-org>
+  - run: vlt run --env-file=.vlt.env -- ./deploy.sh
+```
+
+With `export-env: true` the action resolves `env-file` entries into `$GITHUB_ENV` (each value masked via `::add-mask::` first), so later steps can use `${{ env.NAME }}` — one word away from GitHub-native `${{ secrets.NAME }}`:
+
+```yaml
+  - uses: circlesac/vlt-cli/action@main
+    with:
+      host: https://vault.circles.ac/<your-org>
+      env-file: .vlt.env
+      export-env: "true"
+  - run: ./deploy.sh                # $DB_PASSWORD available to the whole job
+```
+
+`vlt run` keeps secrets scoped to the child process (narrower exposure, recommended); `export-env` trades that for job-wide convenience.
 
 ## Profile / org overrides
 
