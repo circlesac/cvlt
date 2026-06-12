@@ -34,10 +34,12 @@ function download(url) {
   });
 }
 
-// Repo checkout (no version in package.json — oneup stamps it at release):
-// nothing to download. Published packages always carry a version, so CI
-// installs (e.g. GitHub Actions) still download the native binary.
-if (!version) process.exit(0);
+// Only download when installed as a published package (always lives inside a
+// node_modules tree, including npm -g). A repo checkout — local dev or the
+// release workflow itself, where oneup may already have stamped a version —
+// must never try to fetch its own not-yet-published release.
+const isPublishedInstall = __dirname.split(path.sep).includes("node_modules");
+if (!isPublishedInstall || !version) process.exit(0);
 
 const platform = `${process.platform}-${process.arch}`;
 const info = PLATFORMS[platform];
