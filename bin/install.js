@@ -34,7 +34,10 @@ function download(url) {
   });
 }
 
-if (process.env.CI) process.exit(0);
+// Repo checkout (no version in package.json — oneup stamps it at release):
+// nothing to download. Published packages always carry a version, so CI
+// installs (e.g. GitHub Actions) still download the native binary.
+if (!version) process.exit(0);
 
 const platform = `${process.platform}-${process.arch}`;
 const info = PLATFORMS[platform];

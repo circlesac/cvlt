@@ -11,5 +11,9 @@ const bin = path.join(__dirname, "native", `vlt${ext}`);
 if (!existsSync(bin)) {
   await import("./install.js");
 }
+if (!existsSync(bin)) {
+  console.error("[ERROR] vlt native binary is not installed (download failed or unsupported platform)");
+  process.exit(1);
+}
 const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
 process.exit(result.status ?? 1);
