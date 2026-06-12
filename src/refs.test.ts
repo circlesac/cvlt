@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { parseRef, isSecretRef, injectTemplate, parseEnvFile, buildRunEnv } from "./refs"
+import { parseRef, isSecretRef, parseVaultCoordinate, injectTemplate, parseEnvFile, buildRunEnv } from "./refs"
 
 // ── op:// — guards the historical parseSecretRef behavior exactly ────────────
 
@@ -132,5 +132,28 @@ describe("isSecretRef", () => {
     expect(isSecretRef("op://a/b/c")).toBe(true)
     expect(isSecretRef("vlt://github.com/o#N")).toBe(true)
     expect(isSecretRef("plain")).toBe(false)
+  })
+})
+
+describe("parseVaultCoordinate", () => {
+  it("parses project and owner-global coordinates, lowercasing", () => {
+    expect(parseVaultCoordinate("github.com/CirclesAc/My-App")).toEqual({
+      provider: "github.com",
+      owner: "circlesac",
+      repo: "my-app",
+    })
+    expect(parseVaultCoordinate("github.com/circlesac")).toEqual({
+      provider: "github.com",
+      owner: "circlesac",
+      repo: null,
+    })
+  })
+
+  it("returns null for free-form op:// vault names", () => {
+    expect(parseVaultCoordinate("My Passwords")).toBeNull()
+    expect(parseVaultCoordinate("circlesac/my-app")).toBeNull() // no provider → free-form
+    expect(parseVaultCoordinate("gitlab.com/owner/repo")).toBeNull() // unknown provider
+    expect(parseVaultCoordinate("github.com/한글")).toBeNull()
+    expect(parseVaultCoordinate("github.com/o/r/extra")).toBeNull()
   })
 })

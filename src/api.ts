@@ -244,6 +244,21 @@ export async function api<T = unknown>(
   return request<T>(`${baseUrl}${path}`, token, opts)
 }
 
+/** Like api(), but returns null on a non-OK response instead of exiting —
+ * for best-effort lookups (e.g. OIDC callers can't list grants). */
+export async function apiOptional<T = unknown>(path: string): Promise<T | null> {
+  const { baseUrl, token } = await getConfig()
+  try {
+    const res = await fetch(`${baseUrl}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!res.ok) return null
+    return (await res.json()) as T
+  } catch {
+    return null
+  }
+}
+
 async function request<T = unknown>(
   url: string,
   token: string,

@@ -84,6 +84,21 @@ export function isSecretRef(value: string): boolean {
   return value.startsWith("op://") || value.startsWith("vlt://")
 }
 
+export type VaultCoordinate = { provider: string; owner: string; repo: string | null }
+
+/** Coordinate-shaped vault name (`github.com/<owner>[/<repo>]`, lock #20/#21)
+ * vs a free-form op:// vault name. Full coordinate including provider is
+ * canonical — the provider prefix makes the distinction syntactic. */
+export function parseVaultCoordinate(name: string): VaultCoordinate | null {
+  const segments = name.split("/")
+  if (segments.length < 2 || segments.length > 3) return null
+  const [provider, owner, repo] = segments as [string, string, string | undefined]
+  if (!VLT_PROVIDERS.has(provider)) return null
+  if (!OWNER_RE.test(owner)) return null
+  if (repo !== undefined && !REPO_RE.test(repo)) return null
+  return { provider, owner: owner.toLowerCase(), repo: repo !== undefined ? repo.toLowerCase() : null }
+}
+
 export type Resolver = (ref: string) => Promise<string>
 
 /** Replace every {{op://...}} / {{vlt://...}} template reference. */

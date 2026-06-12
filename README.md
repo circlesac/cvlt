@@ -130,32 +130,32 @@ vlt secret set --personal "vlt://github.com/ygpark80/dotfiles#TOKEN" "..."
 vlt secret list --personal
 ```
 
-### OIDC grants (operator-only)
+### Registering repos for CI access (operator-only)
+
+A vault whose name is a GitHub coordinate represents a repo's secret home — **creating it is the consent** that lets that repo's CI read it. One command, once per repo:
 
 ```bash
-# Allow circlesac/my-app's workflows to read any vault in the org
-vlt oidc grant create circlesac/my-app
+# Register: circlesac/my-app's CI can now read its project secrets + circlesac's globals
+vlt vault create github.com/circlesac/my-app
 
-# Narrow by env, restrict to a vault, grant write access
-vlt oidc grant create circlesac/my-app \
-  --env production --vault prod-secrets --role write
+# Options: CI write access to its own project, env/ref narrowing
+vlt vault create github.com/circlesac/my-app --ci-write --env production
 
-# Org-wildcard
-vlt oidc grant create "circlesac/*" --role read
-
-# Inspect / change / revoke
-vlt oidc grant list
-vlt oidc grant get <id>
-vlt oidc grant edit <id> --role write
-vlt oidc grant edit <id> --env null              # clear an optional field
-vlt oidc grant delete <id>
+# Inspect / revoke (revoking removes CI access; the secrets remain)
+vlt vault list                                   # op:// containers + registered repos
+vlt vault get github.com/circlesac/my-app
+vlt vault delete github.com/circlesac/my-app
 ```
 
-`vault create / edit / delete`, `oidc grant *`, and `whoami` require operator (user JWT) auth. OIDC tokens from GitHub Actions are scoped to data-plane operations (read items, write items if `role=write`) and cannot manage vaults or grants regardless of role.
+Owner-global (`github.com/circlesac`) needs no registration — every registered repo of that owner reads it via `project > global`, and org members can `vlt secret set` to it directly.
+
+The legacy `vlt oidc grant create|list|get|edit|delete` commands remain for compatibility and for op://-vault-scoped or org-wildcard (`owner/*`) grants.
+
+`vault create / edit / delete`, `oidc grant *`, and `whoami` require operator (user JWT) auth. OIDC tokens from GitHub Actions are scoped to data-plane operations (read secrets/items, write if allowed) and cannot manage vaults or grants regardless of role.
 
 ## GitHub Actions workflow
 
-After registering a grant once, a workflow needs zero stored secrets:
+After registering the repo once, a workflow needs zero stored secrets:
 
 ```yaml
 permissions:

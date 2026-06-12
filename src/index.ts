@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 
 import { defineCommand, runMain } from "citty"
-import { api, secretsApi, resolveVault, resolveItem, getConfig, setOverrides } from "./api"
-import { parseRef, injectTemplate, buildRunEnv } from "./refs"
+import { api, apiOptional, secretsApi, resolveVault, resolveItem, getConfig, setOverrides } from "./api"
+import { parseRef, parseVaultCoordinate, injectTemplate, buildRunEnv } from "./refs"
 import { checkForUpdate } from "./lib/update-check.ts"
 import { createReadStream, readFileSync } from "node:fs"
 import { writeFileSync } from "node:fs"
@@ -177,17 +177,38 @@ const runCommand = defineCommand({
 
 // vault list
 const vaultListCommand = defineCommand({
-  meta: { name: "list", description: "List all vaults" },
+  meta: { name: "list", description: "List all vaults (op:// containers + registered repos)" },
   args: { ...formatFlag },
   async run({ args }) {
     const vaults = await api<Vault[]>("/v1/vaults")
+    type Grant = { id: string; repository: string; role: string; environment?: string; ref?: string }
+    // Registered coordinate vaults come from grants; OIDC callers can't list
+    // grants, so this part is best-effort.
+    const grants = await apiOptional<Grant[]>("/v1/oidc/grants")
     if (args.format === "json") {
-      console.log(JSON.stringify(vaults, null, 2))
+      const coords = (grants ?? []).map((g) => ({
+        name: `github.com/${g.repository}`,
+        role: g.role,
+        environment: g.environment,
+        ref: g.ref,
+      }))
+      console.log(JSON.stringify({ vaults, registered: coords }, null, 2))
     } else {
       console.log(`${"ID".padEnd(28)} ${"NAME".padEnd(24)} ITEMS`)
       console.log("─".repeat(60))
       for (const v of vaults) {
         console.log(`${v.id.padEnd(28)} ${v.name.padEnd(24)} ${v.items}`)
+      }
+      if (grants && grants.length > 0) {
+        console.log()
+        console.log(`${"REGISTERED REPO".padEnd(44)} ${"ROLE".padEnd(6)} NARROWING`)
+        console.log("─".repeat(70))
+        for (const g of grants) {
+          const narrowing = [g.environment && `env=${g.environment}`, g.ref && `ref=${g.ref}`]
+            .filter(Boolean)
+            .join(" ") || "—"
+          console.log(`${`github.com/${g.repository}`.padEnd(44)} ${g.role.padEnd(6)} ${narrowing}`)
+        }
       }
     }
   },
@@ -201,6 +222,37 @@ const vaultGetCommand = defineCommand({
     ...formatFlag,
   },
   async run({ args }) {
+    const coord = parseVaultCoordinate(args.vault)
+    if (coord) {
+      type Grant = { id: string; repository: string; role: string; environment?: string; ref?: string; created_at: string }
+      type SecretMeta = { owner: string; repo: string | null; name: string }
+      const grants = coord.repo ? await api<Grant[]>("/v1/oidc/grants") : []
+      const matching = grants.filter((g) => g.repository.toLowerCase() === `${coord.owner}/${coord.repo}`)
+      const secrets = await secretsApi<{ secrets: SecretMeta[] }>("/v1/secrets")
+      const inVault = secrets.secrets.filter((s) => s.owner === coord.owner && s.repo === coord.repo)
+      if (args.format === "json") {
+        console.log(JSON.stringify({ name: args.vault, registrations: matching, secrets: inVault.length }, null, 2))
+        return
+      }
+      console.log(`Name:        ${args.vault}`)
+      console.log(`Scope:       ${coord.repo ? "project" : "owner-global"}`)
+      console.log(`Secrets:     ${inVault.length}`)
+      if (coord.repo) {
+        if (matching.length === 0) {
+          console.log("CI access:   not registered (run 'vlt vault create' to allow this repo's CI)")
+        } else {
+          for (const g of matching) {
+            const narrowing = [g.environment && `env=${g.environment}`, g.ref && `ref=${g.ref}`]
+              .filter(Boolean)
+              .join(" ")
+            console.log(`CI access:   ${g.role}${narrowing ? ` (${narrowing})` : ""} since ${g.created_at}`)
+          }
+        }
+      } else {
+        console.log("CI access:   readable by every registered repo of this owner")
+      }
+      return
+    }
     const vaultId = await resolveVault(args.vault)
     const vault = await api<Vault>(`/v1/vaults/${vaultId}`)
     if (args.format === "json") {
@@ -216,15 +268,49 @@ const vaultGetCommand = defineCommand({
   },
 })
 
-// vault create
+// vault create — two surfaces by name shape (RFC #6 lock #21):
+//   coordinate (github.com/<owner>[/<repo>]) → register the repo: creating the
+//     vault IS the consent that lets that repo's CI read it (grant under the hood)
+//   free-form name → classic op:// container
 const vaultCreateCommand = defineCommand({
-  meta: { name: "create", description: "Create a new vault" },
+  meta: { name: "create", description: "Create a vault — coordinate name (github.com/<owner>[/<repo>]) registers a repo for CI access; free-form name creates an op:// container" },
   args: {
     name: { type: "positional" as const, description: "Vault name", required: true },
-    description: { type: "string" as const, description: "Vault description" },
+    description: { type: "string" as const, description: "Vault description (op:// containers only)" },
+    "ci-write": { type: "boolean" as const, description: "Let the repo's CI write its own project secrets (coordinate vaults only; default read-only)" },
+    env: { type: "string" as const, description: "Narrow CI access to a GitHub environment (coordinate vaults only)" },
+    ref: { type: "string" as const, description: "Narrow CI access to a git ref (coordinate vaults only)" },
     ...formatFlag,
   },
   async run({ args }) {
+    const coord = parseVaultCoordinate(args.name)
+    if (coord) {
+      if (!coord.repo) {
+        // Owner-global needs no registration: granted repos of the owner read
+        // it via project > global, humans can `vlt secret set` right away.
+        console.log(`Nothing to register for ${args.name} — owner-global secrets are readable by`)
+        console.log(`every registered repo under '${coord.owner}' and writable by org members:`)
+        console.log(`  vlt secret set "vlt://${coord.provider}/${coord.owner}#NAME" <value>`)
+        return
+      }
+      const body: Record<string, unknown> = {
+        repository: `${coord.owner}/${coord.repo}`,
+        role: args["ci-write"] ? "write" : "read",
+      }
+      if (args.env) body.environment = args.env
+      if (args.ref) body.ref = args.ref
+      type Grant = { id: string; repository: string; role: string }
+      const grant = await api<Grant>("/v1/oidc/grants", { method: "POST", body })
+      if (args.format === "json") {
+        console.log(JSON.stringify(grant, null, 2))
+      } else {
+        console.log(`Registered ${args.name} (${grant.role})`)
+        console.log(`Its CI can now read vlt://${coord.provider}/${coord.owner}/${coord.repo}#<NAME>`)
+        console.log(`and the owner's globals vlt://${coord.provider}/${coord.owner}#<NAME>.`)
+      }
+      return
+    }
+
     const vault = await api<Vault>("/v1/vaults", {
       method: "POST",
       body: { name: args.name, description: args.description || "" },
@@ -262,13 +348,33 @@ const vaultEditCommand = defineCommand({
   },
 })
 
-// vault delete
+// vault delete — coordinate name revokes the repo's CI access (its secrets remain)
 const vaultDeleteCommand = defineCommand({
-  meta: { name: "delete", description: "Delete a vault" },
+  meta: { name: "delete", description: "Delete a vault (coordinate name revokes the repo's CI access; secrets remain)" },
   args: {
     vault: { type: "positional" as const, description: "Vault name or ID", required: true },
   },
   async run({ args }) {
+    const coord = parseVaultCoordinate(args.vault)
+    if (coord) {
+      if (!coord.repo) {
+        console.error("[ERROR] Owner-global has no registration to revoke. Delete individual secrets with 'vlt secret delete'.")
+        process.exit(1)
+      }
+      type Grant = { id: string; repository: string }
+      const grants = await api<Grant[]>("/v1/oidc/grants")
+      const matching = grants.filter((g) => g.repository.toLowerCase() === `${coord.owner}/${coord.repo}`)
+      if (matching.length === 0) {
+        console.error(`[ERROR] ${args.vault} is not registered`)
+        process.exit(1)
+      }
+      for (const g of matching) {
+        await api(`/v1/oidc/grants/${g.id}`, { method: "DELETE" })
+      }
+      console.log(`Revoked CI access for ${args.vault} (${matching.length} registration${matching.length > 1 ? "s" : ""}).`)
+      console.log("Its secrets remain — remove them with 'vlt secret delete' if needed.")
+      return
+    }
     const vaultId = await resolveVault(args.vault)
     await api(`/v1/vaults/${vaultId}`, { method: "DELETE" })
     console.log(`Vault "${args.vault}" deleted.`)
@@ -1117,8 +1223,11 @@ const oidcGrantCommand = defineCommand({
   },
 })
 
+// Legacy surface: 'vlt vault create github.com/<owner>/<repo>' is the primary
+// way to register a repo (RFC #6 lock #21); these remain for compatibility
+// and for narrowing existing registrations.
 const oidcCommand = defineCommand({
-  meta: { name: "oidc", description: "OIDC integration commands" },
+  meta: { name: "oidc", description: "OIDC grant management (legacy — prefer 'vlt vault create github.com/<owner>/<repo>')" },
   subCommands: {
     grant: oidcGrantCommand,
   },
