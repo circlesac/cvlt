@@ -37,29 +37,30 @@ describe("parseRef: op://", () => {
 
 describe("parseRef: vlt://", () => {
   it("parses owner-global refs", () => {
-    expect(parseRef("vlt://github.com/circlesac#OPENAI_KEY")).toEqual({
+    expect(parseRef("vlt://github.com/circlesac/OPENAI_KEY")).toEqual({
       ok: true,
       ref: { scheme: "vlt", provider: "github.com", owner: "circlesac", repo: null, name: "OPENAI_KEY" },
     })
   })
 
   it("parses project refs and lowercases owner/repo", () => {
-    expect(parseRef("vlt://github.com/CirclesAc/Vault#DB_PASSWORD")).toEqual({
+    expect(parseRef("vlt://github.com/CirclesAc/Vault/DB_PASSWORD")).toEqual({
       ok: true,
       ref: { scheme: "vlt", provider: "github.com", owner: "circlesac", repo: "vault", name: "DB_PASSWORD" },
     })
   })
 
   const bad = [
-    ["CJK owner", "vlt://github.com/한글#NAME"],
-    ["percent-encoded slash", "vlt://github.com/owner%2Frepo#NAME"],
-    ["digit-start NAME", "vlt://github.com/o#1NAME"],
-    ["lowercase NAME", "vlt://github.com/o#name"],
-    ["GITHUB_ prefix", "vlt://github.com/o#GITHUB_TOKEN"],
-    ["unknown provider", "vlt://gitlab.com/o#NAME"],
-    ["missing #NAME", "vlt://github.com/o/r"],
-    ["too many segments", "vlt://github.com/o/r/x#NAME"],
-    ["unknown scheme", "secret://github.com/o#NAME"],
+    ["CJK owner", "vlt://github.com/한글/NAME"],
+    ["percent-encoded slash", "vlt://github.com/owner%2Frepo/NAME"],
+    ["digit-start NAME", "vlt://github.com/o/1NAME"],
+    ["lowercase NAME", "vlt://github.com/o/name"],
+    ["GITHUB_ prefix", "vlt://github.com/o/GITHUB_TOKEN"],
+    ["unknown provider", "vlt://gitlab.com/o/NAME"],
+    ["no NAME (2 segments)", "vlt://github.com/owner"],
+    ["too many segments", "vlt://github.com/o/r/x/NAME"],
+    ["uses # instead of /", "vlt://github.com/owner/repo#NAME"],
+    ["unknown scheme", "secret://github.com/o/NAME"],
   ] as const
   for (const [label, ref] of bad) {
     it(`rejects ${label}`, () => {
@@ -72,8 +73,8 @@ describe("parseRef: vlt://", () => {
 
 const FAKE: Record<string, string> = {
   "op://v/i/f": "op-value",
-  "vlt://github.com/circlesac#API_KEY": "vlt-value",
-  "vlt://github.com/circlesac/app#DB_PASSWORD": "project-value",
+  "vlt://github.com/circlesac/API_KEY": "vlt-value",
+  "vlt://github.com/circlesac/app/DB_PASSWORD": "project-value",
 }
 const resolver = async (ref: string) => {
   if (!(ref in FAKE)) throw new Error(`unknown ref ${ref}`)
@@ -83,7 +84,7 @@ const resolver = async (ref: string) => {
 describe("injectTemplate", () => {
   it("replaces both op:// and vlt:// references", async () => {
     const out = await injectTemplate(
-      "A={{op://v/i/f}}\nB={{vlt://github.com/circlesac#API_KEY}}\nC=plain",
+      "A={{op://v/i/f}}\nB={{vlt://github.com/circlesac/API_KEY}}\nC=plain",
       resolver
     )
     expect(out).toBe("A=op-value\nB=vlt-value\nC=plain")
@@ -96,9 +97,9 @@ describe("injectTemplate", () => {
 
 describe("parseEnvFile", () => {
   it("parses KEY=value lines, skipping comments and blanks", () => {
-    expect(parseEnvFile("# c\n\nA=1\nB=vlt://github.com/o#N\n =bad\nC=x=y")).toEqual({
+    expect(parseEnvFile("# c\n\nA=1\nB=vlt://github.com/o/N\n =bad\nC=x=y")).toEqual({
       A: "1",
-      B: "vlt://github.com/o#N",
+      B: "vlt://github.com/o/N",
       C: "x=y",
     })
   })
@@ -108,7 +109,7 @@ describe("buildRunEnv", () => {
   it("resolves refs from env-file and parent env, passes plain values through", async () => {
     const env = await buildRunEnv(
       { HOME: "/home/x", TOKEN: "op://v/i/f" },
-      "DB_PASSWORD=vlt://github.com/circlesac/app#DB_PASSWORD\nPLAIN=hello",
+      "DB_PASSWORD=vlt://github.com/circlesac/app/DB_PASSWORD\nPLAIN=hello",
       resolver
     )
     expect(env.HOME).toBe("/home/x")
@@ -120,7 +121,7 @@ describe("buildRunEnv", () => {
   it("env-file entries override parent env", async () => {
     const env = await buildRunEnv(
       { DB_PASSWORD: "stale" },
-      "DB_PASSWORD=vlt://github.com/circlesac/app#DB_PASSWORD",
+      "DB_PASSWORD=vlt://github.com/circlesac/app/DB_PASSWORD",
       resolver
     )
     expect(env.DB_PASSWORD).toBe("project-value")
@@ -130,7 +131,7 @@ describe("buildRunEnv", () => {
 describe("isSecretRef", () => {
   it("detects both schemes", () => {
     expect(isSecretRef("op://a/b/c")).toBe(true)
-    expect(isSecretRef("vlt://github.com/o#N")).toBe(true)
+    expect(isSecretRef("vlt://github.com/o/N")).toBe(true)
     expect(isSecretRef("plain")).toBe(false)
   })
 })

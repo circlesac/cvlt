@@ -35,7 +35,7 @@ type Vault = {
 
 // ── Secret reading — two address surfaces (op:// + vlt://) ──────────────────
 
-async function readSecret(ref: string, opts: { personal?: boolean } = {}): Promise<string> {
+async function readSecret(ref: string): Promise<string> {
   const parsed = parseRef(ref)
   if (!parsed.ok) {
     console.error(`[ERROR] Invalid secret reference: ${ref}`)
@@ -45,8 +45,7 @@ async function readSecret(ref: string, opts: { personal?: boolean } = {}): Promi
 
   if (parsed.ref.scheme === "vlt") {
     const res = await secretsApi<{ value: string }>(
-      `/v1/secrets/value?ref=${encodeURIComponent(ref)}`,
-      { personal: opts.personal }
+      `/v1/read?ref=${encodeURIComponent(ref)}`
     )
     return res.value
   }
@@ -225,18 +224,19 @@ const vaultGetCommand = defineCommand({
     const coord = parseVaultCoordinate(args.vault)
     if (coord) {
       type Grant = { id: string; repository: string; role: string; environment?: string; ref?: string; created_at: string }
-      type SecretMeta = { owner: string; repo: string | null; name: string }
+      const coordName = `${coord.provider}/${coord.owner}${coord.repo ? `/${coord.repo}` : ""}`
       const grants = coord.repo ? await api<Grant[]>("/v1/oidc/grants") : []
       const matching = grants.filter((g) => g.repository.toLowerCase() === `${coord.owner}/${coord.repo}`)
-      const secrets = await secretsApi<{ secrets: SecretMeta[] }>("/v1/secrets")
-      const inVault = secrets.secrets.filter((s) => s.owner === coord.owner && s.repo === coord.repo)
+      // Secrets live as op:// items in the coordinate-named vault.
+      const vault = (await api<Vault[]>("/v1/vaults")).find((v) => v.name.toLowerCase() === coordName)
+      const secretCount = vault?.items ?? 0
       if (args.format === "json") {
-        console.log(JSON.stringify({ name: args.vault, registrations: matching, secrets: inVault.length }, null, 2))
+        console.log(JSON.stringify({ name: args.vault, registrations: matching, secrets: secretCount }, null, 2))
         return
       }
       console.log(`Name:        ${args.vault}`)
       console.log(`Scope:       ${coord.repo ? "project" : "owner-global"}`)
-      console.log(`Secrets:     ${inVault.length}`)
+      console.log(`Secrets:     ${secretCount}`)
       if (coord.repo) {
         if (matching.length === 0) {
           console.log("CI access:   not registered (run 'vlt vault create' to allow this repo's CI)")
@@ -285,28 +285,38 @@ const vaultCreateCommand = defineCommand({
   async run({ args }) {
     const coord = parseVaultCoordinate(args.name)
     if (coord) {
-      if (!coord.repo) {
-        // Owner-global needs no registration: granted repos of the owner read
-        // it via project > global, humans can `vlt secret set` right away.
-        console.log(`Nothing to register for ${args.name} — owner-global secrets are readable by`)
-        console.log(`every registered repo under '${coord.owner}' and writable by org members:`)
-        console.log(`  vlt secret set "vlt://${coord.provider}/${coord.owner}#NAME" <value>`)
-        return
-      }
-      const body: Record<string, unknown> = {
-        repository: `${coord.owner}/${coord.repo}`,
-        role: args["ci-write"] ? "write" : "read",
-      }
-      if (args.env) body.environment = args.env
-      if (args.ref) body.ref = args.ref
+      const coordName = `${coord.provider}/${coord.owner}${coord.repo ? `/${coord.repo}` : ""}`
+      // The coordinate vault is a real op:// vault — it stores the secrets
+      // (items). Create it idempotently; secrets are written with
+      // `vlt item create --vault <coordinate>`.
+      const existing = (await api<Vault[]>("/v1/vaults")).find((v) => v.name.toLowerCase() === coordName)
+      const vault = existing ?? (await api<Vault>("/v1/vaults", { method: "POST", body: { name: coordName, description: "" } }))
+
+      // A repo coordinate also gets an OIDC grant (the consent that lets that
+      // repo's CI read it). Grants are org-scoped, so this needs --org.
       type Grant = { id: string; repository: string; role: string }
-      const grant = await api<Grant>("/v1/oidc/grants", { method: "POST", body })
+      let grant: Grant | undefined
+      const { org } = await getConfig()
+      if (coord.repo && org) {
+        const body: Record<string, unknown> = {
+          repository: `${coord.owner}/${coord.repo}`,
+          role: args["ci-write"] ? "write" : "read",
+        }
+        if (args.env) body.environment = args.env
+        if (args.ref) body.ref = args.ref
+        grant = await api<Grant>("/v1/oidc/grants", { method: "POST", body })
+      }
+
       if (args.format === "json") {
-        console.log(JSON.stringify(grant, null, 2))
+        console.log(JSON.stringify({ vault, grant: grant ?? null }, null, 2))
       } else {
-        console.log(`Registered ${args.name} (${grant.role})`)
-        console.log(`Its CI can now read vlt://${coord.provider}/${coord.owner}/${coord.repo}#<NAME>`)
-        console.log(`and the owner's globals vlt://${coord.provider}/${coord.owner}#<NAME>.`)
+        console.log(`Vault: ${coordName} (${vault.id})`)
+        console.log(`Write secrets with: vlt item create --vault ${coordName} --title <NAME> 'value[password]=...'`)
+        if (coord.repo && grant) {
+          console.log(`CI access registered (${grant.role}) — its CI can read vlt://${coordName}#<NAME> and owner globals.`)
+        } else if (coord.repo) {
+          console.log(`(No CI grant created — pass --org ${coord.owner} to register this repo's CI access.)`)
+        }
       }
       return
     }
@@ -358,7 +368,7 @@ const vaultDeleteCommand = defineCommand({
     const coord = parseVaultCoordinate(args.vault)
     if (coord) {
       if (!coord.repo) {
-        console.error("[ERROR] Owner-global has no registration to revoke. Delete individual secrets with 'vlt secret delete'.")
+        console.error("[ERROR] Owner-global has no registration to revoke. Delete individual items with 'vlt item delete --vault <coordinate>'.")
         process.exit(1)
       }
       type Grant = { id: string; repository: string }
@@ -372,7 +382,7 @@ const vaultDeleteCommand = defineCommand({
         await api(`/v1/oidc/grants/${g.id}`, { method: "DELETE" })
       }
       console.log(`Revoked CI access for ${args.vault} (${matching.length} registration${matching.length > 1 ? "s" : ""}).`)
-      console.log("Its secrets remain — remove them with 'vlt secret delete' if needed.")
+      console.log("Its secrets remain — remove them with 'vlt item delete --vault <coordinate>' if needed.")
       return
     }
     const vaultId = await resolveVault(args.vault)
@@ -920,149 +930,13 @@ const documentCommand = defineCommand({
   },
 })
 
-// ── Flat secrets (vlt:// surface) ───────────────────────────────────────────
-
-type SecretMeta = {
-  id: string
-  ref: string
-  provider: string
-  owner: string
-  repo: string | null
-  name: string
-  created_at: string
-  updated_at: string
-}
-
-const personalFlag = {
-  personal: { type: "boolean" as const, description: "Use the personal namespace instead of the configured org" },
-}
-
-function requireVltRef(raw: string): string {
-  const parsed = parseRef(raw)
-  if (!parsed.ok || parsed.ref.scheme !== "vlt") {
-    console.error(`[ERROR] Invalid vlt:// reference: ${raw}`)
-    if (!parsed.ok) console.error(parsed.message)
-    else console.error("This command takes vlt:// references (op:// items are managed via 'vlt item')")
-    process.exit(1)
-  }
-  return raw
-}
-
-const secretSetCommand = defineCommand({
-  meta: { name: "set", description: "Create or update a flat secret" },
-  args: {
-    reference: { type: "positional" as const, description: "vlt://<provider>/<owner>[/<repo>]#<NAME>", required: true },
-    value: { type: "positional" as const, description: "Secret value (omit to read from stdin)", required: false },
-    ...personalFlag,
-  },
-  async run({ args }) {
-    const ref = requireVltRef(args.reference)
-    let value = args.value
-    if (value === undefined) {
-      const chunks: Buffer[] = []
-      for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
-      value = Buffer.concat(chunks).toString("utf-8").replace(/\n$/, "")
-    }
-    const res = await secretsApi<{ id: string; created?: boolean; updated?: boolean }>("/v1/secrets", {
-      method: "PUT",
-      body: { ref, value },
-      personal: args.personal,
-    })
-    console.log(`${res.created ? "Created" : "Updated"} ${ref}`)
-  },
-})
-
-const secretGetCommand = defineCommand({
-  meta: { name: "get", description: "Read a flat secret value" },
-  args: {
-    reference: { type: "positional" as const, description: "vlt://<provider>/<owner>[/<repo>]#<NAME>", required: true },
-    "no-newline": { type: "boolean" as const, alias: "n", description: "No trailing newline" },
-    ...personalFlag,
-  },
-  async run({ args }) {
-    const ref = requireVltRef(args.reference)
-    const value = await readSecret(ref, { personal: args.personal })
-    if (args["no-newline"]) process.stdout.write(value)
-    else console.log(value)
-  },
-})
-
-const secretListCommand = defineCommand({
-  meta: { name: "list", description: "List flat secrets (metadata only)" },
-  args: { ...formatFlag, ...personalFlag },
-  async run({ args }) {
-    const res = await secretsApi<{ secrets: SecretMeta[] }>("/v1/secrets", { personal: args.personal })
-    if (args.format === "json") {
-      console.log(JSON.stringify(res.secrets, null, 2))
-      return
-    }
-    if (res.secrets.length === 0) {
-      console.log("(no secrets)")
-      return
-    }
-    console.log(`${"REF".padEnd(60)} UPDATED`)
-    console.log("─".repeat(80))
-    for (const s of res.secrets) {
-      console.log(`${s.ref.padEnd(60)} ${s.updated_at}`)
-    }
-  },
-})
-
-const secretDeleteCommand = defineCommand({
-  meta: { name: "delete", description: "Delete a flat secret" },
-  args: {
-    reference: { type: "positional" as const, description: "vlt://<provider>/<owner>[/<repo>]#<NAME>", required: true },
-    ...personalFlag,
-  },
-  async run({ args }) {
-    const ref = requireVltRef(args.reference)
-    await secretsApi(`/v1/secrets?ref=${encodeURIComponent(ref)}`, {
-      method: "DELETE",
-      personal: args.personal,
-    })
-    console.log(`Deleted ${ref}`)
-  },
-})
-
-const secretResolveCommand = defineCommand({
-  meta: { name: "resolve", description: "Resolve a secret by name (project > global). CI identity implies the coordinate." },
-  args: {
-    name: { type: "positional" as const, description: "Secret NAME", required: true },
-    owner: { type: "string" as const, description: "Owner (required outside CI)" },
-    repo: { type: "string" as const, description: "Repo for project scope (optional)" },
-    "no-newline": { type: "boolean" as const, alias: "n", description: "No trailing newline" },
-    ...personalFlag,
-  },
-  async run({ args }) {
-    const params = new URLSearchParams({ name: args.name })
-    if (args.owner) params.set("owner", args.owner)
-    if (args.repo) params.set("repo", args.repo)
-    const res = await secretsApi<{ value: string }>(`/v1/secrets/resolve?${params}`, {
-      personal: args.personal,
-    })
-    if (args["no-newline"]) process.stdout.write(res.value)
-    else console.log(res.value)
-  },
-})
-
-const secretCommand = defineCommand({
-  meta: { name: "secret", description: "Manage flat secrets (vlt:// surface)" },
-  subCommands: {
-    set: secretSetCommand,
-    get: secretGetCommand,
-    list: secretListCommand,
-    delete: secretDeleteCommand,
-    resolve: secretResolveCommand,
-  },
-})
-
 // whoami
 const whoamiCommand = defineCommand({
   meta: { name: "whoami", description: "Show connection info" },
   async run() {
     const { baseUrl, org } = await getConfig()
-    console.log(`Host: ${baseUrl}`)
-    console.log(`Org:  ${org}`)
+    console.log(`Host:    ${baseUrl}`)
+    console.log(`Account: ${org ? `org:${org}` : "personal"}`)
   },
 })
 
@@ -1242,7 +1116,7 @@ export const main = defineCommand({
   },
   args: {
     profile: { type: "string" as const, description: "crcl profile to use (default: default)" },
-    org: { type: "string" as const, description: "Organization slug override" },
+    org: { type: "string" as const, description: "Target an org account (default: personal). Also honors CRCL_ORG." },
   },
   setup({ args }) {
     setOverrides({ profile: args.profile, org: args.org })
@@ -1251,7 +1125,6 @@ export const main = defineCommand({
     read: readCommand,
     inject: injectCommand,
     run: runCommand,
-    secret: secretCommand,
     vault: vaultCommand,
     item: itemCommand,
     document: documentCommand,

@@ -5,7 +5,7 @@
 `vlt` is the official CLI for [Circles Vault](https://github.com/circlesac/vault) — a secrets manager on Cloudflare Workers with two parallel address surfaces:
 
 - **`op://<vault>/<item>/<field>`** — 1Password Connect-compatible. Most workflows that use `op read`, `op inject`, or `op run` work unchanged by setting `OP_CONNECT_HOST`.
-- **`vlt://<provider>/<owner>[/<repo>]#<NAME>`** — flat GitHub-Secrets-style key→value secrets, addressed by GitHub coordinates. The repo segment selects the scope: present → project secret, absent → owner-global. Designed to replace GitHub Actions secrets (the coordinate is identical to the OIDC `repository` claim).
+- **`vlt://<provider>/<owner>[/<repo>]/<NAME>`** — flat GitHub-Secrets-style key→value secrets, addressed by GitHub coordinates. The repo segment selects the scope: present → project secret, absent → owner-global. Designed to replace GitHub Actions secrets (the coordinate is identical to the OIDC `repository` claim).
 
 `vlt read`, `vlt inject`, and `vlt run` accept both schemes anywhere a reference appears.
 
@@ -30,7 +30,7 @@ npm install -g @circlesac/vlt-cli
 2. **`OP_CONNECT_HOST` + GitHub Actions OIDC** — if `ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN` are present (workflow has `id-token: write`), `vlt` fetches a short-lived OIDC token automatically. No stored secrets.
 3. **`crcl` config** (`~/.config/crcl/config`) — interactive user. Run `crcl login`, optionally `--profile dev` to target the dev environment.
 
-`vlt whoami` shows the resolved host + org.
+`vlt whoami` shows the resolved host + account (`personal` by default, or `org:<slug>` with `--org`/`CRCL_ORG`).
 
 ## Common commands
 
@@ -67,8 +67,8 @@ vlt run --env-file=.vlt.env -- ./deploy.sh
 
 ```bash
 # .vlt.env — safe to commit; values are fetched at runtime
-DB_PASSWORD=vlt://github.com/acme/api#DB_PASSWORD
-OPENAI_KEY=vlt://github.com/acme#OPENAI_KEY
+DB_PASSWORD=vlt://github.com/acme/api/DB_PASSWORD
+OPENAI_KEY=vlt://github.com/acme/OPENAI_KEY
 LEGACY_PASS=op://my-vault/db-credentials/password
 ```
 
@@ -102,54 +102,52 @@ vlt document list --vault prod-secrets
 vlt document get "TLS Cert" --vault prod-secrets -o ./cert.pem
 ```
 
-### Flat secrets (vlt://)
+### GitHub-coordinate secrets (vlt://)
 
-Flat key→value secrets addressed by GitHub coordinates — separate from the op:// vault/item store. `vlt://github.com/<owner>#<NAME>` is owner-global, `vlt://github.com/<owner>/<repo>#<NAME>` is project-scoped; lookups resolve `project > global`. NAME charset is GitHub-isomorphic (`[A-Z0-9_]`, no digit start, no `GITHUB_` prefix); there is no escaping — anything outside the charset is rejected.
+A secret is just an op:// **item** (there's no separate "secret" store or verb). What's special about a vault named like a GitHub coordinate — `github.com/<owner>[/<repo>]` — is that it's addressed by the **`vlt://` reference scheme**, which exists for two reasons `op://` can't cover:
 
-```bash
-# Create / update (value from arg or stdin)
-vlt secret set "vlt://github.com/acme/api#DB_PASSWORD" "s3cret"
-echo -n "s3cret" | vlt secret set "vlt://github.com/acme#OPENAI_KEY"
+1. **Coordinate names contain `/`.** An `op://<vault>/<item>/<field>` reference splits on `/`, so it can't name a vault like `github.com/acme/api` (the slashes collide). `vlt://github.com/<owner>[/<repo>]/<NAME>` knows the structure — `<NAME>` is the last segment, the leading github coordinate is the vault — so it parses unambiguously, no escaping.
+2. **Inheritance.** Reads cascade `project > global` (repo→owner), like GitHub Actions repo/org secrets.
 
-# Read
-vlt secret get "vlt://github.com/acme/api#DB_PASSWORD"
+- `vlt://github.com/<owner>/<repo>/<NAME>` — project; falls back to the owner if absent
+- `vlt://github.com/<owner>/<NAME>` — owner-global
+- NAME charset is GitHub-isomorphic (`[A-Z0-9_]`, no digit start, no `GITHUB_` prefix)
 
-# Resolve by name with project > global precedence
-vlt secret resolve DB_PASSWORD --owner acme --repo api   # humans pass the coordinate
-vlt secret resolve DB_PASSWORD                            # CI: coordinate implied by OIDC identity
-
-# List (metadata only — values are never listed) / delete
-vlt secret list
-vlt secret delete "vlt://github.com/acme/api#DB_PASSWORD"
-```
-
-Secrets belong to the configured org by default. `--personal` (or having no org configured) targets your personal account namespace instead — same scopes, addressed identically, isolated per user:
+The item itself is still managed with the op `item`/`vault` verbs — those take the coordinate as a `--vault` **name** (a flag value, not an `op://` reference, so the slashes are fine).
 
 ```bash
-vlt secret set --personal "vlt://github.com/ygpark80/dotfiles#TOKEN" "..."
-vlt secret list --personal
+# Register the coordinate vault (+ CI grant for a repo coordinate; org-scoped → --org)
+vlt vault create github.com/acme/api --org acme
+
+# Write a secret = create/edit an item in that vault (--vault takes the name)
+vlt item create --vault github.com/acme/api --title DB_PASSWORD 'value[password]=s3cret'
+vlt item edit DB_PASSWORD --vault github.com/acme/api 'value[password]=rotated'
+
+# Read by reference — vlt:// handles the coordinate + inherits (project→owner)
+vlt read "vlt://github.com/acme/api/DB_PASSWORD"          # cascades to github.com/acme if absent
+
+# List / delete = op item verbs (coordinate as --vault name)
+vlt item list --vault github.com/acme/api
+vlt item delete DB_PASSWORD --vault github.com/acme/api
 ```
+
+**Scope: personal by default.** Commands target your personal account unless you escalate to an org with `--org <slug>` (or `CRCL_ORG`). Personal is always available, non-shared, isolated per user; an org is shared, so targeting it is explicit. CI via GitHub OIDC always resolves to the org.
 
 ### Registering repos for CI access (operator-only)
 
-A vault whose name is a GitHub coordinate represents a repo's secret home — **creating it is the consent** that lets that repo's CI read it. One command, once per repo:
+`vlt vault create <coordinate>` creates the op:// vault that stores the secrets; for a **repo** coordinate it also records the OIDC grant that lets that repo's CI read it (**creating it is the consent**). Grants are org-scoped, so pass `--org <owner>`. Once per repo:
 
 ```bash
-# Register: circlesac/my-app's CI can now read its project secrets + circlesac's globals
-vlt vault create github.com/circlesac/my-app
+vlt vault create github.com/circlesac/my-app --org circlesac
+vlt vault create github.com/circlesac/my-app --org circlesac --ci-write --env production
 
-# Options: CI write access to its own project, env/ref narrowing
-vlt vault create github.com/circlesac/my-app --ci-write --env production
-
-# Inspect / revoke (revoking removes CI access; the secrets remain)
-vlt vault list                                   # op:// containers + registered repos
-vlt vault get github.com/circlesac/my-app
-vlt vault delete github.com/circlesac/my-app
+vlt vault get github.com/circlesac/my-app --org circlesac     # registration + secret count
+vlt vault delete github.com/circlesac/my-app --org circlesac  # revokes CI access; items remain
 ```
 
-Owner-global (`github.com/circlesac`) needs no registration — every registered repo of that owner reads it via `project > global`, and org members can `vlt secret set` to it directly.
+Owner-global (`github.com/circlesac`) needs no grant — every registered repo of that owner reads it via `project > global`, and org members write to it with `vlt item create --vault github.com/circlesac --org circlesac …`.
 
-The legacy `vlt oidc grant create|list|get|edit|delete` commands remain for compatibility and for op://-vault-scoped or org-wildcard (`owner/*`) grants.
+The legacy `vlt oidc grant create|list|get|edit|delete` commands remain for op://-vault-scoped or org-wildcard (`owner/*`) grants.
 
 `vault create / edit / delete`, `oidc grant *`, and `whoami` require operator (user JWT) auth. OIDC tokens from GitHub Actions are scoped to data-plane operations (read secrets/items, write if allowed) and cannot manage vaults or grants regardless of role.
 

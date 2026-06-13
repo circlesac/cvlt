@@ -1,11 +1,13 @@
 // Secret reference parsing + substitution — pure functions, no I/O.
 //
-// Two parallel address surfaces (vault RFC #6, locks #12/#13):
-//   op://<vault>/<item>/<field>                      — 1Password-compatible
-//   vlt://<provider>/<owner>[/<repo>]#<NAME>          — flat GitHub-Secrets style
+// Two address surfaces over one store (vault RFC #6; vlt:// grammar lock #22):
+//   op://<vault>/<item>/<field>                  — 1Password-compatible, exact
+//   vlt://<provider>/<owner>[/<repo>]/<NAME>      — github coordinate, inherits
 //
-// vlt:// charset is GitHub-isomorphic (lock #11): there is NO escaping
-// mechanism — inputs outside the charset are rejected, never percent-decoded.
+// vlt:// uses the same slash grammar as op:// (no '#'): NAME is the last
+// segment, the leading github coordinate is the vault. op:// can't name that
+// vault (its name has '/'), which is why vlt:// exists. charset is
+// GitHub-isomorphic (lock #11) — NO escaping; out-of-charset input is rejected.
 
 export type OpRef = { scheme: "op"; vault: string; item: string; field: string }
 export type VltRef = {
@@ -43,16 +45,19 @@ export function parseRef(ref: string): ParseResult {
   }
 
   if (ref.startsWith("vlt://")) {
-    const hashIdx = ref.indexOf("#")
-    if (hashIdx < 0) {
-      return { ok: false, message: "Expected format: vlt://<provider>/<owner>[/<repo>]#<NAME>" }
+    const path = ref.slice("vlt://".length)
+    if (path.includes("#")) {
+      return { ok: false, message: "vlt:// uses '/'-separated segments, not '#' (e.g. vlt://github.com/owner/repo/NAME)" }
     }
-    const name = ref.slice(hashIdx + 1)
-    const segments = ref.slice("vlt://".length, hashIdx).split("/")
-    if (segments.length < 2 || segments.length > 3) {
-      return { ok: false, message: "Expected format: vlt://<provider>/<owner>[/<repo>]#<NAME>" }
+    const segments = path.split("/")
+    // <provider>/<owner>/<NAME> (3) or <provider>/<owner>/<repo>/<NAME> (4)
+    if (segments.length < 3 || segments.length > 4) {
+      return { ok: false, message: "Expected format: vlt://<provider>/<owner>[/<repo>]/<NAME>" }
     }
-    const [provider, owner, repo] = segments as [string, string, string | undefined]
+    const provider = segments[0]!
+    const owner = segments[1]!
+    const repo = segments.length === 4 ? segments[2]! : undefined
+    const name = segments[segments.length - 1]!
     if (!VLT_PROVIDERS.has(provider)) {
       return { ok: false, message: `Unsupported provider: ${provider}` }
     }
