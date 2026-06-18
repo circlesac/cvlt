@@ -1107,6 +1107,100 @@ const oidcCommand = defineCommand({
   },
 })
 
+// ── import ──────────────────────────────────────────────────────────────────
+// Parse a .env file into KEY/value pairs. Handles `export ` prefix, `#` comments,
+// blank lines, and single/double-quoted values (with \n / \" escapes in "..").
+function parseDotenv(text: string): { key: string; value: string }[] {
+  const out: { key: string; value: string }[] = []
+  for (const rawLine of text.split(/\r?\n/)) {
+    let line = rawLine.trim()
+    if (!line || line.startsWith("#")) continue
+    if (line.startsWith("export ")) line = line.slice(7).trimStart()
+    const eq = line.indexOf("=")
+    if (eq <= 0) continue
+    const key = line.slice(0, eq).trim()
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue
+    let value = line.slice(eq + 1).trim()
+    if (
+      value.length >= 2 &&
+      ((value[0] === '"' && value.at(-1) === '"') || (value[0] === "'" && value.at(-1) === "'"))
+    ) {
+      const quote = value[0]
+      value = value.slice(1, -1)
+      if (quote === '"') value = value.replace(/\\n/g, "\n").replace(/\\"/g, '"')
+    }
+    out.push({ key, value })
+  }
+  return out
+}
+
+const importCommand = defineCommand({
+  meta: {
+    name: "import",
+    description: "Import KEY=value pairs from a .env file into a vault as flat secrets",
+  },
+  args: {
+    file: { type: "positional" as const, description: ".env file path", required: true },
+    ...vaultFlag,
+    prefix: { type: "string" as const, description: "Prefix prepended to each key (item title)" },
+    "skip-existing": {
+      type: "boolean" as const,
+      description: "Skip keys that already exist (default: overwrite)",
+    },
+    "dry-run": { type: "boolean" as const, description: "Preview without writing" },
+  },
+  async run({ args }) {
+    if (!args.vault) {
+      console.error("[ERROR] --vault is required")
+      process.exit(1)
+    }
+    const entries = parseDotenv(readFileSync(args.file as string, "utf-8"))
+    if (entries.length === 0) {
+      console.log("No KEY=value pairs found.")
+      return
+    }
+    const vaultId = await resolveVault(args.vault)
+    let created = 0
+    let overwritten = 0
+    let skipped = 0
+    for (const { key, value } of entries) {
+      const title = `${args.prefix ?? ""}${key}`
+      // A flat secret is a single field whose id is "value" — that's what the
+      // vlt:// / op:// resolver reads back (read.ts extractValue).
+      const fields = [{ id: "value", label: "value", value, type: "CONCEALED", purpose: "PASSWORD" }]
+      const existing = await api<{ id: string }[]>(
+        `/v1/vaults/${vaultId}/items?filter=${encodeURIComponent(`title eq "${title}"`)}`
+      )
+      if (args["dry-run"]) {
+        console.log(`${existing.length ? "overwrite" : "create"}  ${title}`)
+        continue
+      }
+      if (existing.length > 0) {
+        if (args["skip-existing"]) {
+          skipped++
+          continue
+        }
+        await api(`/v1/vaults/${vaultId}/items/${existing[0]!.id}`, {
+          method: "PUT",
+          body: { title, category: "API_CREDENTIAL", fields },
+        })
+        overwritten++
+      } else {
+        await api(`/v1/vaults/${vaultId}/items`, {
+          method: "POST",
+          body: { title, category: "API_CREDENTIAL", fields, urls: [], tags: [], favorite: false },
+        })
+        created++
+      }
+    }
+    if (!args["dry-run"]) {
+      console.log(
+        `Imported into ${args.vault}: ${created} created, ${overwritten} overwritten, ${skipped} skipped`
+      )
+    }
+  },
+})
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 export const main = defineCommand({
@@ -1125,6 +1219,7 @@ export const main = defineCommand({
     read: readCommand,
     inject: injectCommand,
     run: runCommand,
+    import: importCommand,
     vault: vaultCommand,
     item: itemCommand,
     document: documentCommand,
