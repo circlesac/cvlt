@@ -43,7 +43,7 @@ async function readSecret(ref: string): Promise<string> {
     process.exit(1)
   }
 
-  if (parsed.ref.scheme === "vlt") {
+  if (parsed.ref.scheme === "cvlt") {
     const res = await secretsApi<{ value: string }>(
       `/v1/read?ref=${encodeURIComponent(ref)}`
     )
@@ -239,7 +239,7 @@ const vaultGetCommand = defineCommand({
       console.log(`Secrets:     ${secretCount}`)
       if (coord.repo) {
         if (matching.length === 0) {
-          console.log("CI access:   not registered (run 'vlt vault create' to allow this repo's CI)")
+          console.log("CI access:   not registered (run 'cvlt vault create' to allow this repo's CI)")
         } else {
           for (const g of matching) {
             const narrowing = [g.environment && `env=${g.environment}`, g.ref && `ref=${g.ref}`]
@@ -288,7 +288,7 @@ const vaultCreateCommand = defineCommand({
       const coordName = `${coord.provider}/${coord.owner}${coord.repo ? `/${coord.repo}` : ""}`
       // The coordinate vault is a real op:// vault — it stores the secrets
       // (items). Create it idempotently; secrets are written with
-      // `vlt item create --vault <coordinate>`.
+      // `cvlt item create --vault <coordinate>`.
       const existing = (await api<Vault[]>("/v1/vaults")).find((v) => v.name.toLowerCase() === coordName)
       const vault = existing ?? (await api<Vault>("/v1/vaults", { method: "POST", body: { name: coordName, description: "" } }))
 
@@ -311,7 +311,7 @@ const vaultCreateCommand = defineCommand({
         console.log(JSON.stringify({ vault, grant: grant ?? null }, null, 2))
       } else {
         console.log(`Vault: ${coordName} (${vault.id})`)
-        console.log(`Write secrets with: vlt item create --vault ${coordName} --title <NAME> 'value[password]=...'`)
+        console.log(`Write secrets with: cvlt item create --vault ${coordName} --title <NAME> 'value[password]=...'`)
         if (coord.repo && grant) {
           console.log(`CI access registered (${grant.role}) — its CI can read vlt://${coordName}#<NAME> and owner globals.`)
         } else if (coord.repo) {
@@ -368,7 +368,7 @@ const vaultDeleteCommand = defineCommand({
     const coord = parseVaultCoordinate(args.vault)
     if (coord) {
       if (!coord.repo) {
-        console.error("[ERROR] Owner-global has no registration to revoke. Delete individual items with 'vlt item delete --vault <coordinate>'.")
+        console.error("[ERROR] Owner-global has no registration to revoke. Delete individual items with 'cvlt item delete --vault <coordinate>'.")
         process.exit(1)
       }
       type Grant = { id: string; repository: string }
@@ -382,7 +382,7 @@ const vaultDeleteCommand = defineCommand({
         await api(`/v1/oidc/grants/${g.id}`, { method: "DELETE" })
       }
       console.log(`Revoked CI access for ${args.vault} (${matching.length} registration${matching.length > 1 ? "s" : ""}).`)
-      console.log("Its secrets remain — remove them with 'vlt item delete --vault <coordinate>' if needed.")
+      console.log("Its secrets remain — remove them with 'cvlt item delete --vault <coordinate>' if needed.")
       return
     }
     const vaultId = await resolveVault(args.vault)
@@ -1097,11 +1097,11 @@ const oidcGrantCommand = defineCommand({
   },
 })
 
-// Legacy surface: 'vlt vault create github.com/<owner>/<repo>' is the primary
+// Legacy surface: 'cvlt vault create github.com/<owner>/<repo>' is the primary
 // way to register a repo (RFC #6 lock #21); these remain for compatibility
 // and for narrowing existing registrations.
 const oidcCommand = defineCommand({
-  meta: { name: "oidc", description: "OIDC grant management (legacy — prefer 'vlt vault create github.com/<owner>/<repo>')" },
+  meta: { name: "oidc", description: "OIDC grant management (legacy — prefer 'cvlt vault create github.com/<owner>/<repo>')" },
   subCommands: {
     grant: oidcGrantCommand,
   },
@@ -1205,7 +1205,7 @@ const importCommand = defineCommand({
 
 export const main = defineCommand({
   meta: {
-    name: "vlt",
+    name: "cvlt",
     description: "1Password-compatible secrets CLI for Circles Vault",
   },
   args: {

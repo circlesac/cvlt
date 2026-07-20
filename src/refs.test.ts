@@ -39,14 +39,14 @@ describe("parseRef: vlt://", () => {
   it("parses owner-global refs", () => {
     expect(parseRef("vlt://github.com/circlesac/OPENAI_KEY")).toEqual({
       ok: true,
-      ref: { scheme: "vlt", provider: "github.com", owner: "circlesac", repo: null, name: "OPENAI_KEY" },
+      ref: { scheme: "cvlt", provider: "github.com", owner: "circlesac", repo: null, name: "OPENAI_KEY" },
     })
   })
 
   it("parses project refs and lowercases owner/repo", () => {
     expect(parseRef("vlt://github.com/CirclesAc/Vault/DB_PASSWORD")).toEqual({
       ok: true,
-      ref: { scheme: "vlt", provider: "github.com", owner: "circlesac", repo: "vault", name: "DB_PASSWORD" },
+      ref: { scheme: "cvlt", provider: "github.com", owner: "circlesac", repo: "vault", name: "DB_PASSWORD" },
     })
   })
 
@@ -73,7 +73,7 @@ describe("parseRef: vlt://", () => {
 
 const FAKE: Record<string, string> = {
   "op://v/i/f": "op-value",
-  "vlt://github.com/circlesac/API_KEY": "vlt-value",
+  "vlt://github.com/circlesac/API_KEY": "cvlt-value",
   "vlt://github.com/circlesac/app/DB_PASSWORD": "project-value",
 }
 const resolver = async (ref: string) => {
@@ -87,7 +87,7 @@ describe("injectTemplate", () => {
       "A={{op://v/i/f}}\nB={{vlt://github.com/circlesac/API_KEY}}\nC=plain",
       resolver
     )
-    expect(out).toBe("A=op-value\nB=vlt-value\nC=plain")
+    expect(out).toBe("A=op-value\nB=cvlt-value\nC=plain")
   })
 
   it("leaves non-reference braces alone", async () => {

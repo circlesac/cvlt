@@ -3,20 +3,20 @@
   "description": "1Password-compatible secrets CLI for Circles Vault",
   "type": "module",
   "bin": {
-    "vlt": "bin/vlt.mjs"
+    "cvlt": "bin/cvlt.mjs"
   },
   "files": [
     "bin"
   ],
   "scripts": {
-    "build": "bun build --compile src/index.ts --outfile vlt",
+    "build": "bun build --compile src/index.ts --outfile cvlt",
     "dev": "bun run src/index.ts",
     "test": "bun test src/",
     "postinstall": "node bin/install.js"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/circlesac/vlt-cli.git"
+    "url": "https://github.com/circlesac/cvlt.git"
   },
   "dependencies": {
     "citty": "^0.2.1"

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="circlesac/vlt-cli"
+REPO="circlesac/cvlt"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -18,10 +18,10 @@ case "$OS-$ARCH" in
 esac
 
 VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | cut -d'"' -f4)
-URL="https://github.com/$REPO/releases/download/$VERSION/vlt-$OS-$ARCH.tar.gz"
+URL="https://github.com/$REPO/releases/download/$VERSION/cvlt-$OS-$ARCH.tar.gz"
 
-echo "Installing vlt $VERSION..."
+echo "Installing cvlt $VERSION..."
 curl -fsSL "$URL" | tar xz -C "$INSTALL_DIR"
-chmod +x "$INSTALL_DIR/vlt"
-echo "standalone" > "$INSTALL_DIR/.vlt-install-method"
-echo "Installed to $INSTALL_DIR/vlt"
+chmod +x "$INSTALL_DIR/cvlt"
+echo "standalone" > "$INSTALL_DIR/.cvlt-install-method"
+echo "Installed to $INSTALL_DIR/cvlt"

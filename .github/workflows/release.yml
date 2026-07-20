@@ -31,19 +31,19 @@ jobs:
         include:
           - os: macos-latest
             bun_target: bun-darwin-arm64
-            name: vlt-darwin-arm64
+            name: cvlt-darwin-arm64
           - os: macos-latest
             bun_target: bun-darwin-x64
-            name: vlt-darwin-amd64
+            name: cvlt-darwin-amd64
           - os: ubuntu-latest
             bun_target: bun-linux-x64
-            name: vlt-linux-amd64
+            name: cvlt-linux-amd64
           - os: ubuntu-latest
             bun_target: bun-linux-arm64
-            name: vlt-linux-arm64
+            name: cvlt-linux-arm64
           - os: windows-latest
             bun_target: bun-windows-x64
-            name: vlt-windows-amd64
+            name: cvlt-windows-amd64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -58,21 +58,21 @@ jobs:
       - run: bun install
 
       - name: Build
-        run: bun build --compile --target=${{ matrix.bun_target }} src/index.ts --outfile vlt
+        run: bun build --compile --target=${{ matrix.bun_target }} src/index.ts --outfile cvlt
 
       - name: Re-sign darwin binary
         if: startsWith(matrix.bun_target, 'bun-darwin')
         run: |
-          codesign --remove-signature vlt
-          codesign --force --deep -s - vlt
+          codesign --remove-signature cvlt
+          codesign --force --deep -s - cvlt
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
-        run: tar czf ${{ matrix.name }}.tar.gz vlt
+        run: tar czf ${{ matrix.name }}.tar.gz cvlt
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
-        run: 7z a ${{ matrix.name }}.zip vlt.exe
+        run: 7z a ${{ matrix.name }}.zip cvlt.exe
         shell: bash
 
       - uses: actions/upload-artifact@v4
@@ -134,23 +134,24 @@ jobs:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           VERSION=${{ needs.version.outputs.version }}
-          SHA_DARWIN_ARM64=$(shasum -a 256 artifacts/vlt-darwin-arm64/*.tar.gz | cut -d' ' -f1)
-          SHA_DARWIN_AMD64=$(shasum -a 256 artifacts/vlt-darwin-amd64/*.tar.gz | cut -d' ' -f1)
-          SHA_LINUX_ARM64=$(shasum -a 256 artifacts/vlt-linux-arm64/*.tar.gz | cut -d' ' -f1)
-          SHA_LINUX_AMD64=$(shasum -a 256 artifacts/vlt-linux-amd64/*.tar.gz | cut -d' ' -f1)
+          SHA_DARWIN_ARM64=$(shasum -a 256 artifacts/cvlt-darwin-arm64/*.tar.gz | cut -d' ' -f1)
+          SHA_DARWIN_AMD64=$(shasum -a 256 artifacts/cvlt-darwin-amd64/*.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM64=$(shasum -a 256 artifacts/cvlt-linux-arm64/*.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_AMD64=$(shasum -a 256 artifacts/cvlt-linux-amd64/*.tar.gz | cut -d' ' -f1)
 
           git clone https://x-access-token:${GH_TOKEN}@github.com/circlesac/homebrew-tap.git
           cd homebrew-tap
 
-          cp ../homebrew/vlt.rb.template Formula/vlt.rb
-          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/vlt.rb
-          sed -i "s/SHA_DARWIN_ARM64/${SHA_DARWIN_ARM64}/g" Formula/vlt.rb
-          sed -i "s/SHA_DARWIN_AMD64/${SHA_DARWIN_AMD64}/g" Formula/vlt.rb
-          sed -i "s/SHA_LINUX_ARM64/${SHA_LINUX_ARM64}/g" Formula/vlt.rb
-          sed -i "s/SHA_LINUX_AMD64/${SHA_LINUX_AMD64}/g" Formula/vlt.rb
+          cp ../homebrew/cvlt.rb.template Formula/cvlt.rb
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/cvlt.rb
+          sed -i "s/SHA_DARWIN_ARM64/${SHA_DARWIN_ARM64}/g" Formula/cvlt.rb
+          sed -i "s/SHA_DARWIN_AMD64/${SHA_DARWIN_AMD64}/g" Formula/cvlt.rb
+          sed -i "s/SHA_LINUX_ARM64/${SHA_LINUX_ARM64}/g" Formula/cvlt.rb
+          sed -i "s/SHA_LINUX_AMD64/${SHA_LINUX_AMD64}/g" Formula/cvlt.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/vlt.rb
-          git commit -m "Update vlt to ${VERSION}"
+          git rm -f Formula/vlt.rb 2>/dev/null || true
+          git add Formula/cvlt.rb
+          git commit -m "Update cvlt to ${VERSION}"
           git push

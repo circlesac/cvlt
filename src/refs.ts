@@ -10,14 +10,14 @@
 // GitHub-isomorphic (lock #11) — NO escaping; out-of-charset input is rejected.
 
 export type OpRef = { scheme: "op"; vault: string; item: string; field: string }
-export type VltRef = {
-  scheme: "vlt"
+export type CcvltRef = {
+  scheme: "cvlt"
   provider: string
   owner: string
   repo: string | null
   name: string
 }
-export type SecretRef = OpRef | VltRef
+export type SecretRef = OpRef | CcvltRef
 
 export type ParseResult =
   | { ok: true; ref: SecretRef }
@@ -27,7 +27,7 @@ export type ParseResult =
 // segments, query suffix ignored, extra segments ignored.
 const OP_RE = /^op:\/\/([^/]+)\/([^/]+)\/([^/?]+)/
 
-const VLT_PROVIDERS = new Set(["github.com"])
+const CVLT_PROVIDERS = new Set(["github.com"])
 const OWNER_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/
 const REPO_RE = /^[a-zA-Z0-9_.-]{1,100}$/
 const NAME_RE = /^[A-Z_][A-Z0-9_]{0,199}$/
@@ -58,7 +58,7 @@ export function parseRef(ref: string): ParseResult {
     const owner = segments[1]!
     const repo = segments.length === 4 ? segments[2]! : undefined
     const name = segments[segments.length - 1]!
-    if (!VLT_PROVIDERS.has(provider)) {
+    if (!CVLT_PROVIDERS.has(provider)) {
       return { ok: false, message: `Unsupported provider: ${provider}` }
     }
     if (!OWNER_RE.test(owner)) {
@@ -73,7 +73,7 @@ export function parseRef(ref: string): ParseResult {
     return {
       ok: true,
       ref: {
-        scheme: "vlt",
+        scheme: "cvlt",
         provider,
         owner: owner.toLowerCase(),
         repo: repo !== undefined ? repo.toLowerCase() : null,
@@ -98,7 +98,7 @@ export function parseVaultCoordinate(name: string): VaultCoordinate | null {
   const segments = name.split("/")
   if (segments.length < 2 || segments.length > 3) return null
   const [provider, owner, repo] = segments as [string, string, string | undefined]
-  if (!VLT_PROVIDERS.has(provider)) return null
+  if (!CVLT_PROVIDERS.has(provider)) return null
   if (!OWNER_RE.test(owner)) return null
   if (repo !== undefined && !REPO_RE.test(repo)) return null
   return { provider, owner: owner.toLowerCase(), repo: repo !== undefined ? repo.toLowerCase() : null }
@@ -131,7 +131,7 @@ export function parseEnvFile(content: string): Record<string, string> {
   return out
 }
 
-/** Build the child-process env for `vlt run`: resolves reference-valued
+/** Build the child-process env for `cvlt run`: resolves reference-valued
  * entries from the env file and the parent env; plain values pass through. */
 export async function buildRunEnv(
   parentEnv: Record<string, string | undefined>,

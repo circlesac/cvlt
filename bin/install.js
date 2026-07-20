@@ -9,14 +9,14 @@ const require = createRequire(import.meta.url);
 const { version } = require("../package.json");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO = "circlesac/vlt-cli";
+const REPO = "circlesac/cvlt";
 
 const PLATFORMS = {
-  "darwin-x64":   { artifact: "vlt-darwin-amd64",   ext: ".tar.gz" },
-  "darwin-arm64": { artifact: "vlt-darwin-arm64",   ext: ".tar.gz" },
-  "linux-x64":    { artifact: "vlt-linux-amd64",    ext: ".tar.gz" },
-  "linux-arm64":  { artifact: "vlt-linux-arm64",    ext: ".tar.gz" },
-  "win32-x64":    { artifact: "vlt-windows-amd64",  ext: ".zip"    },
+  "darwin-x64":   { artifact: "cvlt-darwin-amd64",   ext: ".tar.gz" },
+  "darwin-arm64": { artifact: "cvlt-darwin-arm64",   ext: ".tar.gz" },
+  "linux-x64":    { artifact: "cvlt-linux-amd64",    ext: ".tar.gz" },
+  "linux-arm64":  { artifact: "cvlt-linux-arm64",    ext: ".tar.gz" },
+  "win32-x64":    { artifact: "cvlt-windows-amd64",  ext: ".zip"    },
 };
 
 function download(url) {
@@ -65,5 +65,5 @@ if (ext === ".zip") {
 fs.unlinkSync(tmp);
 
 if (process.platform !== "win32") {
-  fs.chmodSync(path.join(nativeDir, "vlt"), 0o755);
+  fs.chmodSync(path.join(nativeDir, "cvlt"), 0o755);
 }

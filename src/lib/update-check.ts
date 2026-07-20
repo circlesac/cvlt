@@ -6,10 +6,10 @@ import { spawn } from "node:child_process"
 import pkg from "../../package.json"
 
 // ── Per-CLI configuration ──────────────────────────────────────────────────
-const REPO = "circlesac/vlt-cli"
-const CLI_NAME = "vlt"
+const REPO = "circlesac/cvlt"
+const CLI_NAME = "cvlt"
 const NPM_PACKAGE = "@circlesac/vlt-cli"
-const BREW_FORMULA = "circlesac/tap/vlt"
+const BREW_FORMULA = "circlesac/tap/cvlt"
 // ───────────────────────────────────────────────────────────────────────────
 
 const CACHE_DIR = join(homedir(), ".config", CLI_NAME, "cache")

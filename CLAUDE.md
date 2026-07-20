@@ -1,4 +1,4 @@
-# vlt-cli
+# cvlt
 
 ## Release
 
@@ -19,7 +19,7 @@ gh run watch "$RUN_ID" --exit-status
 gh run view "$RUN_ID" --log-failed
 
 # 5. After success, update local binary
-brew update && brew upgrade circlesac/tap/vlt
+brew update && brew upgrade circlesac/tap/cvlt
 ```
 
 The workflow bumps CalVer via `@circlesac/oneup`, builds multi-platform binaries (darwin/linux/windows, x64+arm64), creates a GitHub release, publishes to npm, and updates the Homebrew tap.
