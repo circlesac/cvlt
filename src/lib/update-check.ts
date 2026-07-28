@@ -6,7 +6,7 @@ import { spawn } from "node:child_process"
 import pkg from "../../package.json"
 
 // ── Per-CLI configuration ──────────────────────────────────────────────────
-const REPO = "circlesac/cvlt"
+const REPO = "circlesac/cvlt-cli"
 const CLI_NAME = "cvlt"
 const NPM_PACKAGE = "@circlesac/vlt-cli"
 const BREW_FORMULA = "circlesac/tap/cvlt"

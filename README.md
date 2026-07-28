@@ -19,7 +19,7 @@ brew install circlesac/tap/cvlt
 npm install -g @circlesac/vlt-cli
 
 # Static binaries (no Node required)
-# Download from https://github.com/circlesac/cvlt/releases/latest
+# Download from https://github.com/circlesac/cvlt-cli/releases/latest
 ```
 
 ## Authentication
@@ -187,7 +187,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: circlesac/cvlt/action@main
+  - uses: circlesac/cvlt-cli/action@main
     with:
       host: https://vault.circles.ac/<your-org>
   - run: cvlt run --env-file=.cvlt.env -- ./deploy.sh
@@ -196,7 +196,7 @@ steps:
 With `export-env: true` the action resolves `env-file` entries into `$GITHUB_ENV` (each value masked via `::add-mask::` first), so later steps can use `${{ env.NAME }}` — one word away from GitHub-native `${{ secrets.NAME }}`:
 
 ```yaml
-  - uses: circlesac/cvlt/action@main
+  - uses: circlesac/cvlt-cli/action@main
     with:
       host: https://vault.circles.ac/<your-org>
       env-file: .cvlt.env
