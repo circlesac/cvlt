@@ -3,6 +3,11 @@
 import { defineCommand, runMain } from "citty"
 import { api, apiOptional, secretsApi, resolveVault, resolveItem, getConfig, setOverrides } from "./api"
 import { parseRef, parseVaultCoordinate, injectTemplate, buildRunEnv } from "./refs"
+import {
+  applyFieldAssignments,
+  isFieldAssignment,
+  parseFieldAssignment,
+} from "./item-fields"
 import { checkForUpdate } from "./lib/update-check.ts"
 import { createReadStream, readFileSync } from "node:fs"
 import { writeFileSync } from "node:fs"
@@ -63,31 +68,6 @@ async function readSecret(ref: string): Promise<string> {
     process.exit(1)
   }
   return f.value
-}
-
-// ── Field Assignment Parser ─────────────────────────────────────────────────
-// Format: [section.]field[type]=value  (op CLI compatible)
-
-function parseAssignment(arg: string): { label: string; value: string; type: string; section?: string } {
-  const eqIdx = arg.indexOf("=")
-  if (eqIdx < 0) {
-    console.error(`[ERROR] Invalid assignment: ${arg}`)
-    process.exit(1)
-  }
-  const left = arg.slice(0, eqIdx)
-  const value = arg.slice(eqIdx + 1)
-
-  // Check for [type] suffix
-  const typeMatch = left.match(/^(.+)\[(\w+)\]$/)
-  const label = typeMatch ? typeMatch[1]! : left
-  const type = typeMatch ? typeMatch[2]!.toUpperCase() : "STRING"
-
-  // Check for section prefix
-  const dotIdx = label.indexOf(".")
-  if (dotIdx > 0) {
-    return { section: label.slice(0, dotIdx), label: label.slice(dotIdx + 1), value, type }
-  }
-  return { label, value, type }
 }
 
 // ── Commands ────────────────────────────────────────────────────────────────
@@ -525,17 +505,19 @@ const itemCreateCommand = defineCommand({
     // Parse assignment args (positional args after flags)
     const assignments = rawArgs.filter((a) => a.includes("=") && !a.startsWith("--") && a !== "-")
     const fields = [...templateFields as any[], ...assignments.map((a) => {
-      const parsed = parseAssignment(a)
+      const parsed = parseFieldAssignment(a)
       const purpose = ["username", "password"].includes(parsed.label.toLowerCase())
         ? parsed.label.toUpperCase()
         : undefined
-      const type = parsed.label.toLowerCase() === "password" ? "CONCEALED" : parsed.type
+      const type = parsed.label.toLowerCase() === "password"
+        ? "CONCEALED"
+        : parsed.type ?? "STRING"
       return { id: parsed.label, label: parsed.label, value: parsed.value, type, purpose }
     })]
 
     // Override template fields with assignments
     for (const assign of assignments) {
-      const parsed = parseAssignment(assign)
+      const parsed = parseFieldAssignment(assign)
       const existing = fields.findIndex((f: any) => f.label === parsed.label || f.id === parsed.label)
       if (existing >= 0) {
         (fields[existing] as any).value = parsed.value
@@ -598,19 +580,8 @@ const itemEditCommand = defineCommand({
     const current = await api<Item>(`/v1/vaults/${vaultId}/items/${itemId}`)
 
     // Parse assignment args for field updates
-    const assignments = rawArgs.filter((a) => a.includes("=") && !a.startsWith("--"))
-    const updatedFields = [...(current.fields || [])]
-
-    for (const a of assignments) {
-      const parsed = parseAssignment(a)
-      const existing = updatedFields.findIndex((f) => f.label === parsed.label || f.id === parsed.label)
-      if (existing >= 0) {
-        updatedFields[existing] = { ...updatedFields[existing]!, value: parsed.value }
-      } else {
-        const type = parsed.label.toLowerCase() === "password" ? "CONCEALED" : parsed.type
-        updatedFields.push({ id: parsed.label, label: parsed.label, value: parsed.value, type })
-      }
-    }
+    const assignments = rawArgs.filter(isFieldAssignment)
+    const updatedFields = applyFieldAssignments(current.fields || [], assignments)
 
     const item = await api<Item>(`/v1/vaults/${vaultId}/items/${itemId}`, {
       method: "PUT",

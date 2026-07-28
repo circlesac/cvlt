@@ -90,6 +90,7 @@ cvlt item create --vault prod-secrets --category login --title "DB" username=adm
 cvlt item list --vault prod-secrets
 cvlt item get "DB" --vault prod-secrets --format json
 cvlt item edit "DB" --vault prod-secrets password=newpass
+cvlt item edit "DB" --vault prod-secrets 'token[password]' # change type, preserve value
 cvlt item delete "DB" --vault prod-secrets
 cvlt item move "DB" --current-vault staging --destination-vault prod-secrets
 ```
