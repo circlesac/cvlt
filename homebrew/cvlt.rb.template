@@ -31,6 +31,6 @@ class Cvlt < Formula
   end
 
   test do
-    system "#{bin}/cvlt", "--help"
+    system bin/"cvlt", "--help"
   end
 end
