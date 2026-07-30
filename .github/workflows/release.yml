@@ -77,10 +77,22 @@ jobs:
         run: 7z a ${{ matrix.name }}.zip cvlt.exe
         shell: bash
 
+      - name: Package Debian artifact
+        if: startsWith(matrix.bun_target, 'bun-linux')
+        run: |
+          case "${{ matrix.bun_target }}" in
+            bun-linux-x64) arch=amd64 ;;
+            bun-linux-arm64) arch=arm64 ;;
+            *) exit 1 ;;
+          esac
+          ./packaging/build-deb.sh "cvlt" "${{ needs.version.outputs.version }}" "$arch" .
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.*
+          path: |
+            ${{ matrix.name }}.*
+            cvlt_*.deb
 
   github-release:
     needs: [version, build]
@@ -99,6 +111,7 @@ jobs:
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
+            artifacts/**/*.deb
             bin/install.sh
 
   publish-npm:
@@ -121,7 +134,7 @@ jobs:
 
       - run: npm publish
 
-  publish-homebrew:
+  publish-package-indexes:
     needs: [version, github-release, build]
     runs-on: ubuntu-latest
     steps:
@@ -131,7 +144,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Update Homebrew formula
+      - name: Update Homebrew and APT indexes
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -151,9 +164,24 @@ jobs:
           sed -i "s/SHA_LINUX_ARM64/${SHA_LINUX_ARM64}/g" Formula/cvlt.rb
           sed -i "s/SHA_LINUX_AMD64/${SHA_LINUX_AMD64}/g" Formula/cvlt.rb
 
+
+          mapfile -t packages < <(find ../artifacts -type f -name 'cvlt_*.deb' | sort)
+          test "${#packages[@]}" -eq 2
+          for package in "${packages[@]}"; do
+            ./apt/scripts/add-package.sh "$package" circlesac/cvlt-cli "v${VERSION}"
+          done
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git rm -f Formula/vlt.rb 2>/dev/null || true
-          git add Formula/cvlt.rb
+          git add Formula/cvlt.rb "apt/manifests/cvlt/${VERSION}"
+          git diff --cached --quiet && exit 0
           git commit -m "Update cvlt to ${VERSION}"
-          git push
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin main; then
+              exit 0
+            fi
+            printf 'push attempt %s failed\n' "$attempt" >&2
+          done
+          exit 1
