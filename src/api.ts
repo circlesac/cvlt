@@ -120,8 +120,10 @@ export async function getConfig() {
     ...(_profileOverride ? { profile: _profileOverride } : {}),
   })
   let credential
+  let profile
   try {
     credential = await provider.resolve()
+    profile = credential.source.type === "profile" ? await provider.getProfile() : undefined
   } catch (error) {
     if (isCredentialError(error)) {
       console.error(`Error: ${error.message}`)
@@ -137,7 +139,6 @@ export async function getConfig() {
 
   // An environment credential has no endpoint metadata and therefore targets
   // production. Profile credentials retain their configured environment.
-  const profile = credential.source.type === "profile" ? await provider.getProfile() : undefined
   const isDevProfile = profile?.config.apiUrl?.includes("-dev") || profile?.config.authUrl?.includes("-dev")
   const host = isDevProfile ? DEV_VAULT_HOST : DEFAULT_VAULT_HOST
   const baseUrl = org ? `${host}/${org}` : host
