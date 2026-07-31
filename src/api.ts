@@ -4,73 +4,17 @@
  * Config resolution (priority):
  * 1. OP_CONNECT_HOST + OP_CONNECT_TOKEN (op CLI compat, manual token)
  * 2. OP_CONNECT_HOST + GitHub Actions OIDC env vars (CI, no stored secret)
- * 3. crcl config (~/.config/crcl/config + credentials)
+ * 3. Shared Circles credential provider
  *
- * CLI flags --profile and --org override crcl config values.
+ * CLI flags --profile and --org override shared profile/default-context values.
  */
 
-import { existsSync, readFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { join } from "node:path"
-import { execSync } from "node:child_process"
+import { createCredentialProvider, isCredentialError } from "@circlesac/credentials"
 
 const DEFAULT_VAULT_HOST = "https://vault.circles.ac"
 const DEV_VAULT_HOST = "https://vault.crcl.es"
 
 const OIDC_TOKEN_LEEWAY_MS = 60_000 // refresh 1 min before exp
-
-type IniData = Record<string, Record<string, string>>
-
-function parseIni(text: string): IniData {
-  const data: IniData = {}
-  let section = ""
-  for (const raw of text.split("\n")) {
-    const line = raw.trim()
-    if (!line || line.startsWith("#") || line.startsWith(";")) continue
-    const secMatch = line.match(/^\[(.+)\]$/)
-    if (secMatch) {
-      section = secMatch[1]!
-      if (!data[section]) data[section] = {}
-      continue
-    }
-    const eqIdx = line.indexOf("=")
-    if (eqIdx > 0 && section) {
-      data[section]![line.slice(0, eqIdx).trim()] = line.slice(eqIdx + 1).trim()
-    }
-  }
-  return data
-}
-
-function crclConfigDir(): string {
-  const xdg = process.env.XDG_CONFIG_HOME
-  return join(xdg || join(process.env.HOME || homedir(), ".config"), "crcl")
-}
-
-function readCrclConfig(): IniData {
-  const path = join(crclConfigDir(), "config")
-  if (existsSync(path)) {
-    try { return parseIni(readFileSync(path, "utf-8")) } catch { /* ignore */ }
-  }
-  return {}
-}
-
-function readCrclCredentials(): IniData {
-  const path = join(crclConfigDir(), "credentials")
-  if (existsSync(path)) {
-    try { return parseIni(readFileSync(path, "utf-8")) } catch { /* ignore */ }
-  }
-  return {}
-}
-
-/** Get a fresh token via crcl auth token (handles refresh) */
-function getCrclToken(profile: string): string | null {
-  try {
-    const args = profile !== "default" ? `--profile ${profile}` : ""
-    return execSync(`crcl auth token ${args}`, { encoding: "utf-8", timeout: 10000, stdio: ["pipe", "pipe", "pipe"] }).trim()
-  } catch {
-    return null
-  }
-}
 
 /** Detects GitHub Actions OIDC environment. Both vars are present together
  * when a workflow has `permissions: id-token: write`. */
@@ -169,50 +113,35 @@ export async function getConfig() {
     process.exit(1)
   }
 
-  // 3. crcl config
-  const profile = _profileOverride || process.env.CRCL_PROFILE || "default"
-  const config = readCrclConfig()
-  const section = config[profile] || {}
+  // 3. Shared Circles credential provider. This resolves canonical and legacy
+  // env vars, the shared current profile, legacy profiles, and direct refresh
+  // without requiring the crcl executable.
+  const provider = createCredentialProvider({
+    ...(_profileOverride ? { profile: _profileOverride } : {}),
+  })
+  let credential
+  try {
+    credential = await provider.resolve()
+  } catch (error) {
+    if (isCredentialError(error)) {
+      console.error(`Error: ${error.message}`)
+      process.exit(1)
+    }
+    throw error
+  }
 
   // Scope (lock #22): personal by default. An org is targeted only when
-  // explicitly requested via --org or CRCL_ORG — the crcl config's `org` no
-  // longer auto-escalates, since personal is the safe default for any user
-  // JWT (always available, non-shared). OIDC (CI) above always carries an org.
+  // explicitly requested via --org or CRCL_ORG. Stored profile orgs do not
+  // auto-escalate. OIDC (CI) above always carries an org.
   const org = _orgOverride || process.env.CRCL_ORG || null
 
-  // Determine vault host based on profile
-  const isDevProfile = section.api_url?.includes("-dev") || section.auth_url?.includes("-dev")
+  // An environment credential has no endpoint metadata and therefore targets
+  // production. Profile credentials retain their configured environment.
+  const profile = credential.source.type === "profile" ? await provider.getProfile() : undefined
+  const isDevProfile = profile?.config.apiUrl?.includes("-dev") || profile?.config.authUrl?.includes("-dev")
   const host = isDevProfile ? DEV_VAULT_HOST : DEFAULT_VAULT_HOST
-  // No org → personal namespace base (org slug never appears in the path)
   const baseUrl = org ? `${host}/${org}` : host
-
-  // Get token (try cached credentials first, then crcl auth token)
-  const creds = readCrclCredentials()
-  let token = creds[profile]?.access_token
-
-  // Check if token is expired
-  if (token) {
-    try {
-      const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString())
-      if (payload.exp && payload.exp * 1000 < Date.now()) {
-        token = undefined // expired, need refresh
-      }
-    } catch {
-      token = undefined
-    }
-  }
-
-  // Refresh via crcl auth token if needed
-  if (!token) {
-    token = getCrclToken(profile) || undefined
-  }
-
-  if (!token) {
-    console.error("Error: Not authenticated. Run 'crcl login'" + (profile !== "default" ? ` --profile ${profile}` : ""))
-    process.exit(1)
-  }
-
-  return { baseUrl, token, org }
+  return { baseUrl, token: credential.value, org }
 }
 
 /** Flat secrets API (vlt:// surface). Shares the unified scope of getConfig:
