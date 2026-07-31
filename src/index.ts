@@ -1180,7 +1180,7 @@ export const main = defineCommand({
     description: "1Password-compatible secrets CLI for Circles Vault",
   },
   args: {
-    profile: { type: "string" as const, description: "crcl profile to use (default: default)" },
+    profile: { type: "string" as const, description: "Circles profile to use (default: shared current profile)" },
     org: { type: "string" as const, description: "Target an org account (default: personal). Also honors CRCL_ORG." },
   },
   setup({ args }) {

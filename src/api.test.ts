@@ -6,7 +6,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test"
-import { _resetOidcCache, fetchGithubOidcToken, hasGithubOidcEnv } from "./api"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { _resetOidcCache, fetchGithubOidcToken, getConfig, hasGithubOidcEnv, setOverrides } from "./api"
 
 // Build a minimal valid JWT structure (header.payload.signature) so callers
 // that try to parse `exp` from the payload succeed.
@@ -153,5 +156,142 @@ describe("fetchGithubOidcToken", () => {
       ACTIONS_ID_TOKEN_REQUEST_TOKEN: "t",
     } as NodeJS.ProcessEnv)
     expect(tok).toBeNull()
+  })
+})
+
+describe("getConfig shared Circles credentials", () => {
+  const envKeys = [
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
+    "CIRCLES_AUTH_TOKEN",
+    "CIRCLES_CONFIG_FILE",
+    "CIRCLES_PROFILE",
+    "CIRCLES_SHARED_CREDENTIALS_FILE",
+    "CRCL_AUTH_TOKEN",
+    "CRCL_ORG",
+    "CRCL_PROFILE",
+    "OP_CONNECT_AUDIENCE",
+    "OP_CONNECT_HOST",
+    "OP_CONNECT_TOKEN",
+    "PATH",
+  ] as const
+  const originalEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]))
+  let tempDir = ""
+  let configFile = ""
+  let credentialsFile = ""
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "cvlt-credentials-"))
+    configFile = join(tempDir, "config")
+    credentialsFile = join(tempDir, "credentials")
+    for (const key of envKeys) delete process.env[key]
+    process.env.CIRCLES_CONFIG_FILE = configFile
+    process.env.CIRCLES_SHARED_CREDENTIALS_FILE = credentialsFile
+    setOverrides({})
+  })
+
+  afterEach(() => {
+    setOverrides({})
+    rmSync(tempDir, { recursive: true, force: true })
+    for (const key of envKeys) {
+      const value = originalEnv[key]
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
+  it("uses the shared current profile and its development endpoints", async () => {
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    writeFileSync(configFile, [
+      "[__circles__]",
+      "current_profile = dev:user@example.com",
+      "",
+      "[dev:user@example.com]",
+      "api_url = https://api-dev.circles.ac",
+      "auth_url = https://auth-dev.circles.ac",
+      "org = must-not-auto-escalate",
+      "",
+    ].join("\n"))
+    writeFileSync(credentialsFile, [
+      "[dev:user@example.com]",
+      `access_token = ${token}`,
+      "",
+    ].join("\n"))
+    process.env.PATH = ""
+
+    expect(await getConfig()).toEqual({
+      baseUrl: "https://vault.crcl.es",
+      token,
+      org: null,
+    })
+  })
+
+  it("keeps an explicit profile ahead of an environment credential", async () => {
+    const profileToken = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.CIRCLES_AUTH_TOKEN = fakeJwt(Math.floor(Date.now() / 1000) + 7200)
+    writeFileSync(configFile, [
+      "[dev:user@example.com]",
+      "api_url = https://api-dev.circles.ac",
+      "auth_url = https://auth-dev.circles.ac",
+      "",
+    ].join("\n"))
+    writeFileSync(credentialsFile, [
+      "[dev:user@example.com]",
+      `access_token = ${profileToken}`,
+      "",
+    ].join("\n"))
+    setOverrides({ profile: "dev:user@example.com" })
+
+    expect(await getConfig()).toEqual({
+      baseUrl: "https://vault.crcl.es",
+      token: profileToken,
+      org: null,
+    })
+  })
+
+  it("supports a headless canonical environment credential without files", async () => {
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.CIRCLES_AUTH_TOKEN = token
+
+    expect(await getConfig()).toEqual({
+      baseUrl: "https://vault.circles.ac",
+      token,
+      org: null,
+    })
+  })
+
+  it("refreshes an expired profile directly without the crcl executable", async () => {
+    const expiredToken = fakeJwt(Math.floor(Date.now() / 1000) - 60)
+    const freshToken = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    writeFileSync(configFile, [
+      "[__circles__]",
+      "current_profile = prod:user@example.com",
+      "",
+      "[prod:user@example.com]",
+      "api_url = https://api.circles.ac",
+      "auth_url = https://auth.circles.ac",
+      "",
+    ].join("\n"))
+    writeFileSync(credentialsFile, [
+      "[prod:user@example.com]",
+      `access_token = ${expiredToken}`,
+      "refresh_token = refresh-old",
+      "",
+    ].join("\n"))
+    process.env.PATH = ""
+    fetchSpy = mock(async () => new Response(JSON.stringify({
+      access_token: freshToken,
+      refresh_token: "refresh-new",
+    })))
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    expect(await getConfig()).toEqual({
+      baseUrl: "https://vault.circles.ac",
+      token: freshToken,
+      org: null,
+    })
+    expect(fetchSpy.mock.calls[0]![0]).toBe("https://auth.circles.ac/token")
+    expect(readFileSync(credentialsFile, "utf8")).toContain("refresh_token = refresh-new")
+    expect(readFileSync(credentialsFile, "utf8")).not.toContain("refresh_token = refresh-old")
   })
 })
