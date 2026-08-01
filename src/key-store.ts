@@ -36,10 +36,6 @@ function macWrite(account: string, value: string): boolean {
   return result.status === 0
 }
 
-function linuxAvailable(): boolean {
-  return spawnSync("secret-tool", ["--version"], { stdio: "ignore" }).status === 0
-}
-
 function linuxRead(account: string): string | null {
   const result = spawnSync("secret-tool", ["lookup", "service", "circlesac.cvlt", "account", account], {
     encoding: "utf8",
@@ -53,6 +49,9 @@ function linuxWrite(account: string, value: string): boolean {
     ["store", "--label", "Circles Vault client key", "service", "circlesac.cvlt", "account", account],
     { input: value, encoding: "utf8" }
   )
+  if (process.env.CVLT_TEST_OS_KEYSTORE === "1" && result.status !== 0) {
+    throw new Error(`Linux Secret Service failed: ${result.error?.message || result.stderr.trim() || `exit ${result.status}`}`)
+  }
   return result.status === 0
 }
 
@@ -78,6 +77,9 @@ function windowsWrite(account: string, value: string): boolean {
     input: value,
     encoding: "utf8",
   })
+  if (process.env.CVLT_TEST_OS_KEYSTORE === "1" && result.status !== 0) {
+    throw new Error(`Windows DPAPI failed: ${result.error?.message || result.stderr.trim() || `exit ${result.status}`}`)
+  }
   return result.status === 0
 }
 
@@ -155,7 +157,7 @@ export async function loadDeviceKey(origin: string): Promise<DeviceKey | null> {
   let value: string | null = null
   if (process.platform === "darwin") value = macRead(account)
   else if (process.platform === "win32") value = windowsRead(account)
-  else if (linuxAvailable()) value = linuxRead(account)
+  else value = linuxRead(account)
   if (value === null) value = await readEncryptedKeyFile(account)
   return value ? JSON.parse(value) as DeviceKey : null
 }
@@ -166,7 +168,7 @@ export async function saveDeviceKey(origin: string, key: DeviceKey): Promise<voi
   let stored = false
   if (process.platform === "darwin") stored = macWrite(account, value)
   else if (process.platform === "win32") stored = windowsWrite(account, value)
-  else if (linuxAvailable()) stored = linuxWrite(account, value)
+  else stored = linuxWrite(account, value)
   if (!stored) stored = await writeEncryptedKeyFile(account, value)
   if (!stored) throw new Error("Unable to store the vault client key securely")
 }
