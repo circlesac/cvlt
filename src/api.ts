@@ -10,6 +10,17 @@
  */
 
 import { createCredentialProvider, isCredentialError } from "@circlesac/credentials"
+import {
+  completeRecovery as completeE2eeRecovery,
+  downloadEncryptedFile,
+  e2eeDoctor,
+  handleApi,
+  handleSecretsApi,
+  migrateE2ee,
+  startRecovery as startE2eeRecovery,
+  uploadEncryptedFile,
+  VaultApiError,
+} from "./e2ee-client"
 
 const DEFAULT_VAULT_HOST = "https://vault.circles.ac"
 const DEV_VAULT_HOST = "https://vault.crcl.es"
@@ -151,16 +162,37 @@ export async function secretsApi<T = unknown>(
   path: string,
   opts: { method?: string; body?: unknown } = {}
 ): Promise<T> {
-  const { baseUrl, token } = await getConfig()
-  return request<T>(`${baseUrl}${path}`, token, opts)
+  const config = await getConfig()
+  try {
+    const translated = await handleSecretsApi<T>(config, path, fetchGithubOidcToken)
+    if (translated.handled) return translated.value as T
+    return request<T>(`${config.baseUrl}${path}`, config.token, opts)
+  } catch (error) {
+    return fail(error)
+  }
 }
 
 export async function api<T = unknown>(
   path: string,
   opts: { method?: string; body?: unknown } = {}
 ): Promise<T> {
-  const { baseUrl, token } = await getConfig()
-  return request<T>(`${baseUrl}${path}`, token, opts)
+  const config = await getConfig()
+  try {
+    const translated = await handleApi<T>(config, path, opts, fetchGithubOidcToken)
+    if (translated.handled) return translated.value as T
+    return request<T>(`${config.baseUrl}${path}`, config.token, opts)
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+function fail(error: unknown): never {
+  if (error instanceof VaultApiError) {
+    console.error(`[ERROR] ${error.status}: ${error.message}`)
+  } else {
+    console.error(`[ERROR] ${(error as Error).message}`)
+  }
+  process.exit(1)
 }
 
 /** Like api(), but returns null on a non-OK response instead of exiting —
@@ -232,20 +264,72 @@ export async function resolveItem(
   nameOrId: string
 ): Promise<string> {
   type Item = { id: string; title: string }
-  const items = await api<Item[]>(
-    `/v1/vaults/${vaultId}/items?filter=${encodeURIComponent(`title eq "${nameOrId}"`)}`
-  )
-  if (items.length > 0) return items[0]!.id
-
-  const { baseUrl, token } = await getConfig()
-  const res = await fetch(`${baseUrl}/v1/vaults/${vaultId}/items/${nameOrId}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  })
-  if (res.ok) {
-    const item = (await res.json()) as Item
-    return item.id
-  }
+  const items = await api<Item[]>(`/v1/vaults/${vaultId}/items`)
+  const match = items.find((item) => item.id === nameOrId || item.title === nameOrId)
+  if (match) return match.id
 
   console.error(`[ERROR] Item "${nameOrId}" not found in vault`)
   process.exit(1)
+}
+
+export async function uploadFile(
+  vaultId: string,
+  itemId: string,
+  name: string,
+  contentType: string,
+  content: Uint8Array
+) {
+  try {
+    return await uploadEncryptedFile(
+      await getConfig(),
+      vaultId,
+      itemId,
+      name,
+      contentType,
+      content,
+      fetchGithubOidcToken
+    )
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function downloadFile(vaultId: string, itemId: string, fileId: string) {
+  try {
+    return await downloadEncryptedFile(await getConfig(), vaultId, itemId, fileId, fetchGithubOidcToken)
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function migrateToE2ee(progress?: (message: string) => void) {
+  try {
+    return await migrateE2ee(await getConfig(), fetchGithubOidcToken, progress)
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function doctorE2ee() {
+  try {
+    return await e2eeDoctor(await getConfig())
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function startRecovery() {
+  try {
+    return await startE2eeRecovery(await getConfig())
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function completeRecovery(emailCode: string, recoveryCode: string) {
+  try {
+    return await completeE2eeRecovery(await getConfig(), emailCode, recoveryCode)
+  } catch (error) {
+    return fail(error)
+  }
 }

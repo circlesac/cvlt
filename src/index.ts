@@ -1,7 +1,21 @@
 #!/usr/bin/env bun
 
 import { defineCommand, runMain } from "citty"
-import { api, apiOptional, secretsApi, resolveVault, resolveItem, getConfig, setOverrides } from "./api"
+import {
+  api,
+  apiOptional,
+  completeRecovery,
+  doctorE2ee,
+  downloadFile,
+  getConfig,
+  migrateToE2ee,
+  resolveItem,
+  resolveVault,
+  secretsApi,
+  setOverrides,
+  startRecovery,
+  uploadFile,
+} from "./api"
 import { parseRef, parseVaultCoordinate, injectTemplate, buildRunEnv } from "./refs"
 import {
   applyFieldAssignments,
@@ -12,6 +26,7 @@ import { checkForUpdate } from "./lib/update-check.ts"
 import { createReadStream, readFileSync } from "node:fs"
 import { writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
+import { promptSecret } from "./key-store"
 
 type Item = {
   id: string
@@ -812,20 +827,14 @@ const documentCreateCommand = defineCommand({
       body: { title, category: "DOCUMENT", fields: [] },
     })
 
-    // Upload file
     const fileContent = readFileSync(args.file)
-    const { baseUrl, token } = await getConfig()
-    const form = new FormData()
-    form.append("file", new Blob([fileContent]), args.file.split("/").pop() || "file")
-    const res = await fetch(`${baseUrl}/v1/vaults/${vaultId}/items/${item.id}/files`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
-    })
-    if (!res.ok) {
-      console.error(`[ERROR] Failed to upload file: ${res.status}`)
-      process.exit(1)
-    }
+    await uploadFile(
+      vaultId,
+      item.id,
+      args.file.split("/").pop() || "file",
+      "application/octet-stream",
+      new Uint8Array(fileContent)
+    )
 
     if (args.format === "json") {
       console.log(JSON.stringify({ id: item.id, title, vault_id: vaultId }, null, 2))
@@ -874,15 +883,8 @@ const documentGetCommand = defineCommand({
       process.exit(1)
     }
     const file = fileList[0]!
-    const { baseUrl, token } = await getConfig()
-    const res = await fetch(`${baseUrl}/${file.content_path}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (!res.ok) {
-      console.error(`[ERROR] Failed to download: ${res.status}`)
-      process.exit(1)
-    }
-    const content = Buffer.from(await res.arrayBuffer())
+    const downloaded = await downloadFile(vaultId, itemId, file.id)
+    const content = Buffer.from(downloaded.content)
     if (args.output) {
       writeFileSync(args.output, content)
       console.log(`Saved to ${args.output}`)
@@ -1078,6 +1080,63 @@ const oidcCommand = defineCommand({
   },
 })
 
+const migrateE2eeCommand = defineCommand({
+  meta: { name: "e2ee", description: "Encrypt all legacy vault content client-side" },
+  async run() {
+    const result = await migrateToE2ee((message) => console.error(message))
+    console.log(`Migrated and verified: ${result.vaults} vaults, ${result.items} items, ${result.files} files`)
+  },
+})
+
+const migrateCommand = defineCommand({
+  meta: { name: "migrate", description: "Run Vault data migrations" },
+  subCommands: { e2ee: migrateE2eeCommand },
+})
+
+const doctorCommand = defineCommand({
+  meta: { name: "doctor", description: "Check client encryption and migration state" },
+  args: { ...formatFlag },
+  async run({ args }) {
+    const status = await doctorE2ee()
+    if (args.format === "json") {
+      console.log(JSON.stringify(status, null, 2))
+      return
+    }
+    console.log(`Account encryption: ${status.initialized ? "ready" : "not initialized"}`)
+    console.log(`Local client key:   ${status.client_registered ? "registered" : "not registered"}`)
+    console.log(`Vaults:             ${status.encrypted_vaults} encrypted, ${status.legacy_vaults} legacy`)
+    console.log(`Items:              ${status.encrypted_items} encrypted, ${status.legacy_items} legacy`)
+    console.log(`GitHub OIDC KMS:    ${status.kms_ready ? "ready" : "not ready"}`)
+  },
+})
+
+const recoveryStartCommand = defineCommand({
+  meta: { name: "start", description: "Send an account recovery verification code" },
+  async run() {
+    await startRecovery()
+    console.log("If recovery is available, a verification code will be sent.")
+  },
+})
+
+const recoveryCompleteCommand = defineCommand({
+  meta: { name: "complete", description: "Register this installation using recovery" },
+  args: {
+    code: { type: "positional" as const, description: "8-digit email verification code", required: true },
+  },
+  async run({ args }) {
+    await completeRecovery(args.code, promptSecret("Vault recovery code: "))
+    console.log("This installation is registered and can decrypt the account.")
+  },
+})
+
+const recoverCommand = defineCommand({
+  meta: { name: "recover", description: "Recover access on a new installation" },
+  subCommands: {
+    start: recoveryStartCommand,
+    complete: recoveryCompleteCommand,
+  },
+})
+
 // ── import ──────────────────────────────────────────────────────────────────
 // Parse a .env file into KEY/value pairs. Handles `export ` prefix, `#` comments,
 // blank lines, and single/double-quoted values (with \n / \" escapes in "..").
@@ -1195,6 +1254,9 @@ export const main = defineCommand({
     item: itemCommand,
     document: documentCommand,
     oidc: oidcCommand,
+    migrate: migrateCommand,
+    doctor: doctorCommand,
+    recover: recoverCommand,
     whoami: whoamiCommand,
   },
 })

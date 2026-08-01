@@ -103,6 +103,26 @@ cvlt document list --vault prod-secrets
 cvlt document get "TLS Cert" --vault prod-secrets -o ./cert.pem
 ```
 
+### Client encryption and migration
+
+All new vault content is encrypted locally before upload. Existing v1 data remains readable while it is migrated, but `cvlt` refuses to write new plaintext into an unmigrated vault.
+
+```bash
+cvlt doctor                       # encryption, migration, and GitHub OIDC KMS state
+cvlt migrate e2ee --org circlesac # resumable; verifies before deleting each legacy copy
+```
+
+The first interactive initialization prints a high-entropy recovery code once. Store it outside Vault. The installation private key is saved in macOS Keychain, Windows DPAPI, Linux Secret Service, or a passphrase-encrypted local file when no OS store exists.
+
+On a new machine, run a fresh `crcl login`, then:
+
+```bash
+cvlt recover start --org circlesac
+cvlt recover complete 12345678 --org circlesac
+```
+
+The second command prompts for the recovery code without placing it in shell history. Email codes last 10 minutes, allow five attempts, and cannot be resent while active.
+
 ### GitHub-coordinate secrets (vlt://)
 
 A secret is just an op:// **item** (there's no separate "secret" store or verb). What's special about a vault named like a GitHub coordinate — `github.com/<owner>[/<repo>]` — is that it's addressed by the **`vlt://` reference scheme**, which exists for two reasons `op://` can't cover:
