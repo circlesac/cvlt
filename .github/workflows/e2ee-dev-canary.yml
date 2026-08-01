@@ -24,8 +24,15 @@ jobs:
           OP_CONNECT_AUDIENCE: https://vault.circles.ac/circlesac
         run: |
           set -euo pipefail
-          actual_sha256="$(./cvlt read --no-newline vlt://github.com/circlesac/cvlt-cli/CVLT_E2EE_CANARY | sha256sum | cut -d' ' -f1)"
-          test "$actual_sha256" = "$EXPECTED_SHA256"
+          if ! ./cvlt read --out-file /tmp/cvlt-canary vlt://github.com/circlesac/cvlt-cli/CVLT_E2EE_CANARY 2>/tmp/cvlt-read.err; then
+            cat /tmp/cvlt-read.err >&2
+            exit 1
+          fi
+          actual_sha256="$(sha256sum /tmp/cvlt-canary | cut -d' ' -f1)"
+          if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
+            echo "SHA-256 mismatch: expected=$EXPECTED_SHA256 actual=$actual_sha256" >&2
+            exit 1
+          fi
           if ./cvlt read --no-newline vlt://github.com/circlesac/other-repository/CVLT_E2EE_CANARY >/tmp/cvlt-other.out 2>/tmp/cvlt-other.err; then
             echo "unexpected cross-coordinate read" >&2
             exit 1
