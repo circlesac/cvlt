@@ -122,6 +122,28 @@ type CryptoContext = {
   accountKey: Uint8Array | null
 }
 
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue)
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalValue(entry)])
+    )
+  }
+  return value
+}
+
+async function sha256Hex(value: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", value)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
+async function canonicalHash(value: unknown): Promise<string> {
+  return sha256Hex(new TextEncoder().encode(JSON.stringify(canonicalValue(value))))
+}
+
 export class VaultApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message)
@@ -790,8 +812,9 @@ async function migrateFile(
   const response = await fetch(`${config.baseUrl}/${file.content_path}`, { headers: authHeaders(config) })
   if (!response.ok) throw new VaultApiError(response.status, await errorMessage(response))
   const content = new Uint8Array(await response.arrayBuffer())
+  const contentType = response.headers.get("Content-Type") || "application/octet-stream"
   const metadata = await encryptJson(
-    { name: file.name, content_type: response.headers.get("Content-Type") || "application/octet-stream" },
+    { name: file.name, content_type: contentType },
     vaultKeyBytes,
     `cvlt:v1:vault:${vault.id}:item:${itemId}:file:${file.id}:metadata`
   )
@@ -810,6 +833,31 @@ async function migrateFile(
     body: encrypted,
   })
   if (!migrated.ok) throw new VaultApiError(migrated.status, await errorMessage(migrated))
+  const verifyResponse = await fetch(
+    `${config.baseUrl}/v2/vaults/${vault.id}/items/${itemId}/files/${file.id}/content`,
+    { headers: authHeaders(config) }
+  )
+  if (!verifyResponse.ok) throw new VaultApiError(verifyResponse.status, await errorMessage(verifyResponse))
+  const verifiedContent = await decryptContent(
+    parseEncryptedBytes(new Uint8Array(await verifyResponse.arrayBuffer())),
+    vaultKeyBytes,
+    `cvlt:v1:vault:${vault.id}:item:${itemId}:file:${file.id}:content`
+  )
+  if (await sha256Hex(verifiedContent) !== await sha256Hex(content)) {
+    throw new Error(`Migration verification failed for file ${file.id}`)
+  }
+  const verifiedRow = (await fileRows(config, vault.id, itemId)).find((candidate) => candidate.id === file.id)
+  if (!verifiedRow?.encrypted || !verifiedRow.metadata) {
+    throw new Error(`Migration verification failed for file ${file.id}`)
+  }
+  const verifiedMetadata = await decryptJson<FileMetadata>(
+    verifiedRow.metadata,
+    vaultKeyBytes,
+    `cvlt:v1:vault:${vault.id}:item:${itemId}:file:${file.id}:metadata`
+  )
+  if (await canonicalHash(verifiedMetadata) !== await canonicalHash({ name: file.name, content_type: contentType })) {
+    throw new Error(`Migration verification failed for file metadata ${file.id}`)
+  }
 }
 
 export async function migrateE2ee(
@@ -828,6 +876,7 @@ export async function migrateE2ee(
     const vaultId = String(legacySummary.id)
     let row = existingRows.find((candidate) => candidate.id === vaultId)
     let key: Uint8Array
+    let expectedVaultOverview: VaultOverview
     if (!row?.encrypted) {
       const legacy = await legacyRequest<Record<string, unknown>>(config, `/v1/vaults/${vaultId}`)
       key = randomKey()
@@ -839,6 +888,7 @@ export async function migrateE2ee(
           ? { password_rotation_days: legacy.password_rotation_days as number | null }
           : {}),
       }
+      expectedVaultOverview = overview
       const coordinate = parseVaultCoordinate(overview.name)
       const kmsWrapped = context.status.kms.public_key_pem
         ? await wrapVaultKeyForKms(key, vaultId, context.status.kms.public_key_pem)
@@ -863,8 +913,18 @@ export async function migrateE2ee(
       progress(`vault ${vaultId}: key prepared`)
     } else {
       key = await vaultKey(config, row, fetchOidcToken)
+      if (!row.overview) throw new Error(`Vault ${vaultId} has no encrypted overview`)
+      expectedVaultOverview = await decryptJson<VaultOverview>(
+        row.overview,
+        key,
+        `cvlt:v1:vault:${vaultId}:overview`
+      )
     }
     const rows = await jsonRequest<ItemRow[]>(config, `/v2/vaults/${vaultId}/items`)
+    const expectedFileCounts = new Map<string, number>()
+    for (const itemRow of rows) {
+      expectedFileCounts.set(itemRow.id, (await fileRows(config, vaultId, itemRow.id)).length)
+    }
     const legacyItems = rows.filter((item) => !item.encrypted)
     for (const legacyItemRow of legacyItems) {
       const item = await legacyRequest<Record<string, unknown>>(
@@ -898,16 +958,53 @@ export async function migrateE2ee(
         },
       })
       const verifyRow = await jsonRequest<ItemRow>(config, `/v2/vaults/${vaultId}/items/${legacyItemRow.id}`)
-      const verified = await encryptedItem(config, verifyRow, row, fetchOidcToken)
-      if (verified.title !== item.title || JSON.stringify(verified.fields) !== JSON.stringify(item.fields)) {
+      if (!verifyRow.overview || !verifyRow.details) {
+        throw new Error(`Migration verification failed for item ${legacyItemRow.id}`)
+      }
+      const verifiedPayload = {
+        overview: await decryptJson<ItemOverview>(
+          verifyRow.overview,
+          key,
+          `cvlt:v1:vault:${vaultId}:item:${legacyItemRow.id}:overview`
+        ),
+        details: await decryptJson<ItemDetails>(
+          verifyRow.details,
+          key,
+          `cvlt:v1:vault:${vaultId}:item:${legacyItemRow.id}:details`
+        ),
+      }
+      if (await canonicalHash(verifiedPayload) !== await canonicalHash(payload)) {
         throw new Error(`Migration verification failed for item ${legacyItemRow.id}`)
       }
       itemCount++
-      progress(`item ${itemCount}: encrypted and verified`)
+      progress(`item ${itemCount}: encrypted and canonical hash verified`)
+    }
+    const verifiedRows = await jsonRequest<ItemRow[]>(config, `/v2/vaults/${vaultId}/items`)
+    if (verifiedRows.length !== rows.length || verifiedRows.some((item) => !item.encrypted)) {
+      throw new Error(`Migration item count verification failed for vault ${vaultId}`)
+    }
+    for (const itemRow of verifiedRows) {
+      const verifiedFiles = await fileRows(config, vaultId, itemRow.id)
+      if (
+        verifiedFiles.length !== expectedFileCounts.get(itemRow.id)
+        || verifiedFiles.some((file) => !file.encrypted)
+      ) {
+        throw new Error(`Migration file count verification failed for item ${itemRow.id}`)
+      }
     }
     await jsonRequest(config, `/v2/migrate/vaults/${vaultId}/commit`, { method: "POST" })
-    const verifiedVault = await encryptedVault(config, await findVaultRow(config, vaultId), fetchOidcToken)
-    if (!verifiedVault.name) throw new Error(`Migration verification failed for vault ${vaultId}`)
+    const verifiedVault = await findVaultRow(config, vaultId)
+    if (!verifiedVault.encrypted || !verifiedVault.overview) {
+      throw new Error(`Migration verification failed for vault ${vaultId}`)
+    }
+    const verifiedVaultOverview = await decryptJson<VaultOverview>(
+      verifiedVault.overview,
+      key,
+      `cvlt:v1:vault:${vaultId}:overview`
+    )
+    if (await canonicalHash(verifiedVaultOverview) !== await canonicalHash(expectedVaultOverview)) {
+      throw new Error(`Migration canonical hash verification failed for vault ${vaultId}`)
+    }
     vaultCount++
   }
   return { vaults: vaultCount, items: itemCount, files: fileCount }
