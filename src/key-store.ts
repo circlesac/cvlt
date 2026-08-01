@@ -57,10 +57,11 @@ function linuxWrite(account: string, value: string): boolean {
 
 function windowsScript(path: string, operation: "read" | "write"): string {
   const escaped = path.replace(/'/g, "''")
+  const prefix = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;"
   if (operation === "write") {
-    return `$value=[Console]::In.ReadToEnd();$bytes=[Text.Encoding]::UTF8.GetBytes($value);$enc=[Security.Cryptography.ProtectedData]::Protect($bytes,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName('${escaped}'))|Out-Null;[IO.File]::WriteAllBytes('${escaped}',$enc)`
+    return `${prefix}$value=[Console]::In.ReadToEnd();$bytes=[Text.Encoding]::UTF8.GetBytes($value);$enc=[System.Security.Cryptography.ProtectedData]::Protect($bytes,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName('${escaped}'))|Out-Null;[IO.File]::WriteAllBytes('${escaped}',$enc)`
   }
-  return `if(Test-Path '${escaped}'){$enc=[IO.File]::ReadAllBytes('${escaped}');$bytes=[Security.Cryptography.ProtectedData]::Unprotect($enc,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))}`
+  return `${prefix}if(Test-Path '${escaped}'){$enc=[IO.File]::ReadAllBytes('${escaped}');$bytes=[System.Security.Cryptography.ProtectedData]::Unprotect($enc,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))}`
 }
 
 function windowsRead(account: string): string | null {
