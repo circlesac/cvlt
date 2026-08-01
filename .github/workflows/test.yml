@@ -1,7 +1,8 @@
 name: Test
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [feat/17-client-e2ee]
 
 permissions:
   contents: read
