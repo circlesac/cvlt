@@ -69,6 +69,10 @@ function defaultFieldType(label: string): string {
   return label.toLowerCase() === "password" ? "CONCEALED" : "STRING"
 }
 
+function defaultFieldPurpose(label: string): string | undefined {
+  return label.toLowerCase() === "password" ? "PASSWORD" : undefined
+}
+
 export function applyFieldAssignments(
   fields: ItemField[],
   assignments: string[]
@@ -85,6 +89,7 @@ export function applyFieldAssignments(
       const field = { ...updated[existing]! }
       if (assignment.value !== undefined) field.value = assignment.value
       if (assignment.type !== undefined) field.type = assignment.type
+      if (field.purpose === undefined) field.purpose = defaultFieldPurpose(field.label)
       updated[existing] = field
       continue
     }
@@ -94,6 +99,7 @@ export function applyFieldAssignments(
       label: assignment.label,
       value: assignment.value ?? "",
       type: assignment.type ?? defaultFieldType(assignment.label),
+      ...(defaultFieldPurpose(assignment.label) ? { purpose: defaultFieldPurpose(assignment.label) } : {}),
     })
   }
 
