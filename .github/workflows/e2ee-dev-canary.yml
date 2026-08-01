@@ -1,0 +1,33 @@
+name: E2EE Dev Canary
+
+on:
+  push:
+    branches: [feat/17-client-e2ee]
+    paths: [.github/workflows/e2ee-dev-canary.yml]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun build --compile src/index.ts --outfile cvlt
+      - name: Verify authorized KMS read and coordinate isolation
+        env:
+          EXPECTED_SHA256: "f84c0ba60998f20d41d0eb5f57e5f0d47bb879585151a9eeed03b0ebf599f0c2"
+          OP_CONNECT_HOST: https://vault.crcl.es/circlesac
+          OP_CONNECT_AUDIENCE: https://vault.circles.ac/circlesac
+        run: |
+          set -euo pipefail
+          actual_sha256="$(./cvlt read --no-newline vlt://github.com/circlesac/cvlt-cli/CVLT_E2EE_CANARY | sha256sum | cut -d' ' -f1)"
+          test "$actual_sha256" = "$EXPECTED_SHA256"
+          if ./cvlt read --no-newline vlt://github.com/circlesac/other-repository/CVLT_E2EE_CANARY >/tmp/cvlt-other.out 2>/tmp/cvlt-other.err; then
+            echo "unexpected cross-coordinate read" >&2
+            exit 1
+          fi
+          echo "authorized read hash matched; cross-coordinate read denied"
