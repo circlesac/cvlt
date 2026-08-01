@@ -26,6 +26,7 @@ import { createReadStream, readFileSync } from "node:fs"
 import { writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { promptSecret } from "./key-store"
+import { startConnectServer } from "./connect-server"
 
 type Item = {
   id: string
@@ -1123,6 +1124,32 @@ const recoverCommand = defineCommand({
   },
 })
 
+const connectCommand = defineCommand({
+  meta: { name: "connect", description: "Run a local 1Password Connect-compatible bridge" },
+  args: {
+    port: { type: "string" as const, description: "Local port (default: random)" },
+  },
+  async run({ args }) {
+    const port = args.port === undefined ? 0 : Number(args.port)
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      console.error("[ERROR] --port must be between 0 and 65535")
+      process.exit(1)
+    }
+    const bridge = await startConnectServer(port)
+    console.log(`1Password Connect bridge listening on ${bridge.host}`)
+    console.log(`export OP_CONNECT_HOST=${bridge.host}`)
+    console.log(`export OP_CONNECT_TOKEN=${bridge.token}`)
+    await new Promise<void>((resolve) => {
+      const stop = () => {
+        bridge.stop()
+        resolve()
+      }
+      process.once("SIGINT", stop)
+      process.once("SIGTERM", stop)
+    })
+  },
+})
+
 // ── import ──────────────────────────────────────────────────────────────────
 // Parse a .env file into KEY/value pairs. Handles `export ` prefix, `#` comments,
 // blank lines, and single/double-quoted values (with \n / \" escapes in "..").
@@ -1242,6 +1269,7 @@ export const main = defineCommand({
     oidc: oidcCommand,
     doctor: doctorCommand,
     recover: recoverCommand,
+    connect: connectCommand,
     whoami: whoamiCommand,
   },
 })

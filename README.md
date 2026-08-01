@@ -74,6 +74,24 @@ ACCOUNT_PASSWORD=op://my-vault/db-credentials/password
 
 `cvlt run` resolves `op://` / `vlt://` references found in `--env-file` entries and the process env, then exec's the command with the actual values.
 
+### Use the 1Password `op` CLI
+
+Run the localhost-only Connect bridge in one terminal:
+
+```bash
+cvlt connect
+```
+
+Copy the printed `OP_CONNECT_HOST` and `OP_CONNECT_TOKEN` exports into another terminal. The standard 1Password CLI can then read Circles Vault without a separate account key argument:
+
+```bash
+op read "op://my-vault/db-credentials/password"
+op inject --in-file config.yml.tpl
+DB_PASS="op://my-vault/db-credentials/password" op run --no-masking -- printenv DB_PASS
+```
+
+The bridge decrypts locally with this installation's protected key and stops accepting requests when `cvlt connect` exits.
+
 ### Manage vaults
 
 ```bash

@@ -26,6 +26,7 @@ import {
   type RecoveryEnvelope,
   type RsaEnvelope,
 } from "./e2ee-crypto"
+import { filterVaults } from "./connect-filters.js"
 
 export type VaultConfig = { baseUrl: string; token: string; org: string | null }
 export type RequestOptions = { method?: string; body?: unknown }
@@ -172,7 +173,7 @@ function isOidc(): boolean {
 }
 
 async function readStatus(config: VaultConfig, device: DeviceKey | null): Promise<Status> {
-  return jsonRequest<Status>(config, "/v2/status", {}, device ? { "X-CVLT-Client-ID": device.clientId } : {})
+  return jsonRequest<Status>(config, "/v1/status", {}, device ? { "X-CVLT-Client-ID": device.clientId } : {})
 }
 
 async function bootstrap(config: VaultConfig, device: DeviceKey | null): Promise<CryptoContext> {
@@ -183,7 +184,7 @@ async function bootstrap(config: VaultConfig, device: DeviceKey | null): Promise
   if (status.initialized) return cryptoContext(config, false)
   const accountKey = randomKey()
   const recovery = await createRecoveryEnvelope(accountKey, status.account)
-  await jsonRequest(config, "/v2/bootstrap", {
+  await jsonRequest(config, "/v1/bootstrap", {
     method: "POST",
     body: {
       client: {
@@ -318,11 +319,11 @@ async function encryptedVault(
 }
 
 async function vaultRows(config: VaultConfig): Promise<VaultRow[]> {
-  return jsonRequest<VaultRow[]>(config, "/v2/vaults")
+  return jsonRequest<VaultRow[]>(config, "/v1/vaults")
 }
 
 async function findVaultRow(config: VaultConfig, vaultId: string): Promise<VaultRow> {
-  return jsonRequest<VaultRow>(config, `/v2/vaults/${vaultId}`)
+  return jsonRequest<VaultRow>(config, `/v1/vaults/${vaultId}`)
 }
 
 async function encryptedItem(
@@ -427,7 +428,7 @@ async function createItem(
 ): Promise<Record<string, unknown>> {
   const key = await vaultKey(config, vault, fetchOidcToken)
   const payload = itemPayload(body)
-  const row = await jsonRequest<ItemRow>(config, `/v2/vaults/${vault.id}/items`, {
+  const row = await jsonRequest<ItemRow>(config, `/v1/vaults/${vault.id}/items`, {
     method: "POST",
     body: {
       id,
@@ -449,7 +450,7 @@ async function updateItem(
   const current = await encryptedItem(config, row, vault, fetchOidcToken)
   const key = await vaultKey(config, vault, fetchOidcToken)
   const payload = itemPayload(body, current)
-  const updated = await jsonRequest<ItemRow>(config, `/v2/vaults/${vault.id}/items/${row.id}`, {
+  const updated = await jsonRequest<ItemRow>(config, `/v1/vaults/${vault.id}/items/${row.id}`, {
     method: "PUT",
     body: {
       version: row.version,
@@ -478,7 +479,7 @@ function filterItems(items: Record<string, unknown>[], query: URLSearchParams): 
 }
 
 async function fileRows(config: VaultConfig, vaultId: string, itemId: string): Promise<FileRow[]> {
-  return jsonRequest<FileRow[]>(config, `/v2/vaults/${vaultId}/items/${itemId}/files`)
+  return jsonRequest<FileRow[]>(config, `/v1/vaults/${vaultId}/items/${itemId}/files`)
 }
 
 async function encryptedFileInfo(
@@ -525,7 +526,7 @@ export async function uploadEncryptedFile(
     key,
     `cvlt:v1:vault:${vaultId}:item:${itemId}:file:${fileId}:content`
   ))
-  const response = await fetch(`${config.baseUrl}/v2/vaults/${vaultId}/items/${itemId}/files`, {
+  const response = await fetch(`${config.baseUrl}/v1/vaults/${vaultId}/items/${itemId}/files`, {
     method: "POST",
     headers: {
       ...authHeaders(config),
@@ -549,7 +550,7 @@ export async function downloadEncryptedFile(
   const vault = await findVaultRow(config, vaultId)
   const row = (await fileRows(config, vaultId, itemId)).find((file) => file.id === fileId)
   if (!row) throw new Error("File not found")
-  const response = await fetch(`${config.baseUrl}/v2/vaults/${vaultId}/items/${itemId}/files/${fileId}/content`, {
+  const response = await fetch(`${config.baseUrl}/v1/vaults/${vaultId}/items/${itemId}/files/${fileId}/content`, {
     headers: authHeaders(config),
   })
   if (!response.ok) throw new VaultApiError(response.status, await errorMessage(response))
@@ -582,7 +583,7 @@ async function createVault(
   const kmsWrapped = context.status.kms.public_key_pem
     ? await wrapVaultKeyForKms(key, id, context.status.kms.public_key_pem)
     : null
-  const row = await jsonRequest<VaultRow>(config, "/v2/vaults", {
+  const row = await jsonRequest<VaultRow>(config, "/v1/vaults", {
     method: "POST",
     body: {
       id,
@@ -615,12 +616,12 @@ async function coordinateRead(
   const name = decodeURIComponent(match[4]!)
   const query = new URLSearchParams({ provider, owner })
   if (repository) query.set("repository", repository)
-  const rows = await jsonRequest<VaultRow[]>(config, `/v2/coordinates?${query}`)
+  const rows = await jsonRequest<VaultRow[]>(config, `/v1/coordinates?${query}`)
   const candidates: { vault_id: string; locator: string }[] = []
   for (const row of rows) {
     candidates.push({ vault_id: row.id, locator: await itemLocator(await vaultKey(config, row, fetchOidcToken), name) })
   }
-  const item = await jsonRequest<ItemRow>(config, "/v2/coordinates/read", {
+  const item = await jsonRequest<ItemRow>(config, "/v1/coordinates/read", {
     method: "POST",
     body: { provider, owner, repository, candidates },
   })
@@ -662,9 +663,10 @@ export async function handleApi<T>(
       return { handled: true, value: await createVault(config, options.body as Record<string, unknown>) as T }
     }
     const rows = await vaultRows(config)
+    const vaults = await Promise.all(rows.map((row) => encryptedVault(config, row, fetchOidcToken)))
     return {
       handled: true,
-      value: await Promise.all(rows.map((row) => encryptedVault(config, row, fetchOidcToken))) as T,
+      value: filterVaults(vaults, url.searchParams) as T,
     }
   }
 
@@ -672,7 +674,7 @@ export async function handleApi<T>(
   const vault = await findVaultRow(config, vaultId)
   if (parts.length === 3) {
     if (method === "DELETE") {
-      await jsonRequest(config, `/v2/vaults/${vaultId}`, { method: "DELETE" })
+      await jsonRequest(config, `/v1/vaults/${vaultId}`, { method: "DELETE" })
       return { handled: true, value: undefined as T }
     }
     if (method === "PUT") {
@@ -687,7 +689,7 @@ export async function handleApi<T>(
             ? { password_rotation_days: current.password_rotation_days as number }
             : {}),
       }
-      const row = await jsonRequest<VaultRow>(config, `/v2/vaults/${vaultId}`, {
+      const row = await jsonRequest<VaultRow>(config, `/v1/vaults/${vaultId}`, {
         method: "PUT",
         body: {
           overview: await encryptJson(
@@ -710,7 +712,7 @@ export async function handleApi<T>(
         value: await createItem(config, vault, options.body as Record<string, unknown>, fetchOidcToken) as T,
       }
     }
-    const rows = await jsonRequest<ItemRow[]>(config, `/v2/vaults/${vaultId}/items`)
+    const rows = await jsonRequest<ItemRow[]>(config, `/v1/vaults/${vaultId}/items`)
     const items = await Promise.all(rows.map((row) => encryptedItem(config, row, vault, fetchOidcToken)))
     return { handled: true, value: filterItems(items, url.searchParams) as T }
   }
@@ -727,7 +729,7 @@ export async function handleApi<T>(
     return { handled: false }
   }
 
-  const row = await jsonRequest<ItemRow>(config, `/v2/vaults/${vaultId}/items/${itemId}`)
+  const row = await jsonRequest<ItemRow>(config, `/v1/vaults/${vaultId}/items/${itemId}`)
   if (parts[5] === "move" && method === "POST") {
     const destinationId = String((options.body as Record<string, unknown>).vault)
     const destination = await findVaultRow(config, destinationId)
@@ -748,11 +750,11 @@ export async function handleApi<T>(
         fetchOidcToken
       )
     }
-    await jsonRequest(config, `/v2/vaults/${vaultId}/items/${itemId}`, { method: "DELETE" })
+    await jsonRequest(config, `/v1/vaults/${vaultId}/items/${itemId}`, { method: "DELETE" })
     return { handled: true, value: created as T }
   }
   if (method === "DELETE") {
-    await jsonRequest(config, `/v2/vaults/${vaultId}/items/${itemId}`, { method: "DELETE" })
+    await jsonRequest(config, `/v1/vaults/${vaultId}/items/${itemId}`, { method: "DELETE" })
     return { handled: true, value: undefined as T }
   }
   if (method === "PUT") {
@@ -775,7 +777,7 @@ export async function e2eeDoctor(config: VaultConfig): Promise<{
   const rows = await vaultRows(config)
   let items = 0
   for (const row of rows) {
-    items += (await jsonRequest<ItemRow[]>(config, `/v2/vaults/${row.id}/items`)).length
+    items += (await jsonRequest<ItemRow[]>(config, `/v1/vaults/${row.id}/items`)).length
   }
   return {
     initialized: context.status.initialized,
@@ -792,7 +794,7 @@ export async function e2eeDoctor(config: VaultConfig): Promise<{
 }
 
 export async function startRecovery(config: VaultConfig): Promise<void> {
-  await jsonRequest(config, "/v2/recovery/start", { method: "POST" })
+  await jsonRequest(config, "/v1/recovery/start", { method: "POST" })
 }
 
 export async function completeRecovery(
@@ -803,14 +805,14 @@ export async function completeRecovery(
   const status = await readStatus(config, null)
   const verified = await jsonRequest<{ recovery_token: string; recovery: RecoveryEnvelope }>(
     config,
-    "/v2/recovery/verify",
+    "/v1/recovery/verify",
     { method: "POST", body: { code: emailCode } }
   )
   const accountKey = await openRecoveryEnvelope(verified.recovery, recoveryCode, status.account)
   const device = await generateDeviceKey()
   await saveDeviceKey(new URL(config.baseUrl).origin, device)
   const replacementRecovery = await createRecoveryEnvelope(accountKey, status.account)
-  await jsonRequest(config, "/v2/recovery/complete", {
+  await jsonRequest(config, "/v1/recovery/complete", {
     method: "POST",
     body: {
       recovery_token: verified.recovery_token,
