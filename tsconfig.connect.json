@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "outDir": "dist"
+  },
+  "include": ["src/connect.ts", "src/connect-filters.ts", "src/e2ee-crypto.ts"]
+}

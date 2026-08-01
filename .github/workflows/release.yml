@@ -157,6 +157,8 @@ jobs:
         with:
           name: versioned-files
 
+      - run: npm install --ignore-scripts
+      - run: npm run build:connect
       - run: npm publish
 
   publish-package-indexes:

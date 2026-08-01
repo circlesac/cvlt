@@ -5,11 +5,19 @@
   "bin": {
     "cvlt": "bin/cvlt.mjs"
   },
+  "exports": {
+    "./connect": {
+      "types": "./dist/connect.d.ts",
+      "import": "./dist/connect.js"
+    }
+  },
   "files": [
-    "bin"
+    "bin",
+    "dist"
   ],
   "scripts": {
     "build": "bun build --compile src/index.ts --outfile cvlt",
+    "build:connect": "tsc -p tsconfig.connect.json",
     "dev": "bun run src/index.ts",
     "test": "bun test src/",
     "postinstall": "node bin/install.js"

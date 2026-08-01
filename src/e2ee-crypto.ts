@@ -36,12 +36,22 @@ export type DeviceKey = {
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
+function arrayBuffer(value: Uint8Array): ArrayBuffer {
+  return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer
+}
+
 export function encodeBase64(value: Uint8Array): string {
-  return Buffer.from(value).toString("base64url")
+  let binary = ""
+  for (let offset = 0; offset < value.length; offset += 0x8000) {
+    binary += String.fromCharCode(...value.subarray(offset, offset + 0x8000))
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")
 }
 
 export function decodeBase64(value: string): Uint8Array {
-  return new Uint8Array(Buffer.from(value, "base64url"))
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/")
+  const binary = atob(normalized + "=".repeat((4 - normalized.length % 4) % 4))
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0))
 }
 
 export function randomKey(): Uint8Array {
@@ -62,15 +72,20 @@ export function generateOpaqueId(): string {
 }
 
 async function aesKey(bytes: Uint8Array, usage: KeyUsage[]): Promise<CryptoKey> {
-  return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, usage)
+  return crypto.subtle.importKey("raw", arrayBuffer(bytes), "AES-GCM", false, usage)
 }
 
 async function encryptAes(plaintext: Uint8Array, keyBytes: Uint8Array, context: string): Promise<AesEnvelope> {
   const nonce = crypto.getRandomValues(new Uint8Array(12))
   const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: nonce, additionalData: encoder.encode(context), tagLength: 128 },
+    {
+      name: "AES-GCM",
+      iv: arrayBuffer(nonce),
+      additionalData: arrayBuffer(encoder.encode(context)),
+      tagLength: 128,
+    },
     await aesKey(keyBytes, ["encrypt"]),
-    plaintext
+    arrayBuffer(plaintext)
   )
   return {
     version: 1,
@@ -87,12 +102,12 @@ async function decryptAes(envelope: AesEnvelope, keyBytes: Uint8Array, context: 
   const plaintext = await crypto.subtle.decrypt(
     {
       name: "AES-GCM",
-      iv: decodeBase64(envelope.nonce),
-      additionalData: encoder.encode(context),
+      iv: arrayBuffer(decodeBase64(envelope.nonce)),
+      additionalData: arrayBuffer(encoder.encode(context)),
       tagLength: 128,
     },
     await aesKey(keyBytes, ["decrypt"]),
-    decodeBase64(envelope.ciphertext)
+    arrayBuffer(decodeBase64(envelope.ciphertext))
   )
   return new Uint8Array(plaintext)
 }
@@ -165,9 +180,9 @@ export async function wrapAccountKeyForDevice(
     ["encrypt"]
   )
   const ciphertext = await crypto.subtle.encrypt(
-    { name: "RSA-OAEP", label: encoder.encode(`cvlt:v1:account:${account}`) },
+    { name: "RSA-OAEP", label: arrayBuffer(encoder.encode(`cvlt:v1:account:${account}`)) },
     publicKey,
-    accountKey
+    arrayBuffer(accountKey)
   )
   return { version: 1, algorithm: "RSA-OAEP-3072-SHA256", ciphertext: encodeBase64(new Uint8Array(ciphertext)) }
 }
@@ -188,17 +203,17 @@ export async function unwrapAccountKeyForDevice(
     ["decrypt"]
   )
   const plaintext = await crypto.subtle.decrypt(
-    { name: "RSA-OAEP", label: encoder.encode(`cvlt:v1:account:${account}`) },
+    { name: "RSA-OAEP", label: arrayBuffer(encoder.encode(`cvlt:v1:account:${account}`)) },
     privateKey,
-    decodeBase64(envelope.ciphertext)
+    arrayBuffer(decodeBase64(envelope.ciphertext))
   )
   return new Uint8Array(plaintext)
 }
 
 async function recoveryKey(code: string, salt: Uint8Array): Promise<Uint8Array> {
-  const material = await crypto.subtle.importKey("raw", encoder.encode(code), "PBKDF2", false, ["deriveBits"])
+  const material = await crypto.subtle.importKey("raw", arrayBuffer(encoder.encode(code)), "PBKDF2", false, ["deriveBits"])
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt, iterations: 600000 },
+    { name: "PBKDF2", hash: "SHA-256", salt: arrayBuffer(salt), iterations: 600000 },
     material,
     256
   )
@@ -239,7 +254,7 @@ export async function openRecoveryEnvelope(
 export async function itemLocator(vaultKey: Uint8Array, name: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
-    vaultKey,
+    arrayBuffer(vaultKey),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
@@ -247,14 +262,14 @@ export async function itemLocator(vaultKey: Uint8Array, name: string): Promise<s
   const signature = await crypto.subtle.sign(
     "HMAC",
     key,
-    encoder.encode(`cvlt:v1:locator\0${name.normalize("NFKC")}`)
+    arrayBuffer(encoder.encode(`cvlt:v1:locator\0${name.normalize("NFKC")}`))
   )
   return encodeBase64(new Uint8Array(signature))
 }
 
 function pemBytes(pem: string): Uint8Array {
   const base64 = pem.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\s/g, "")
-  return new Uint8Array(Buffer.from(base64, "base64"))
+  return decodeBase64(base64)
 }
 
 export async function wrapVaultKeyForKms(
@@ -264,13 +279,13 @@ export async function wrapVaultKeyForKms(
 ): Promise<RsaEnvelope> {
   const publicKey = await crypto.subtle.importKey(
     "spki",
-    pemBytes(publicKeyPem),
+    arrayBuffer(pemBytes(publicKeyPem)),
     { name: "RSA-OAEP", hash: "SHA-256" },
     false,
     ["encrypt"]
   )
   const plaintext = encoder.encode(JSON.stringify({ version: 1, vault_id: vaultId, vault_key: encodeBase64(vaultKey) }))
-  const ciphertext = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, publicKey, plaintext)
+  const ciphertext = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, publicKey, arrayBuffer(plaintext))
   return { version: 1, algorithm: "RSA-OAEP-3072-SHA256", ciphertext: encodeBase64(new Uint8Array(ciphertext)) }
 }
 
