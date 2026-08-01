@@ -59,6 +59,31 @@ jobs:
 
       - run: bun install
 
+      - name: Install Linux Secret Service
+        if: matrix.bun_target == 'bun-linux-x64'
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libsecret-tools
+
+      - name: Test macOS key store
+        if: matrix.bun_target == 'bun-darwin-arm64'
+        env:
+          CVLT_TEST_OS_KEYSTORE: "1"
+        run: bun test src/
+
+      - name: Test Windows key store
+        if: matrix.bun_target == 'bun-windows-x64'
+        env:
+          CVLT_TEST_OS_KEYSTORE: "1"
+        run: bun test src/
+
+      - name: Test Linux key store
+        if: matrix.bun_target == 'bun-linux-x64'
+        run: |
+          dbus-run-session -- bash -lc '
+            printf "%s" "test-keyring-password" | gnome-keyring-daemon --unlock >/dev/null
+            export CVLT_TEST_OS_KEYSTORE=1
+            bun test src/
+          '
+
       - name: Build
         run: bun build --compile --target=${{ matrix.bun_target }} src/index.ts --outfile cvlt
 
