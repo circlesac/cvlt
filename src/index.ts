@@ -8,7 +8,6 @@ import {
   doctorE2ee,
   downloadFile,
   getConfig,
-  migrateToE2ee,
   resolveItem,
   resolveVault,
   secretsApi,
@@ -1070,31 +1069,18 @@ const oidcGrantCommand = defineCommand({
   },
 })
 
-// Legacy surface: 'cvlt vault create github.com/<owner>/<repo>' is the primary
-// way to register a repo (RFC #6 lock #21); these remain for compatibility
-// and for narrowing existing registrations.
+// 'cvlt vault create github.com/<owner>/<repo>' is the primary registration
+// path (RFC #6 lock #21); these advanced commands support explicit grant
+// scoping and narrowing existing registrations.
 const oidcCommand = defineCommand({
-  meta: { name: "oidc", description: "OIDC grant management (legacy — prefer 'cvlt vault create github.com/<owner>/<repo>')" },
+  meta: { name: "oidc", description: "Advanced OIDC grant management" },
   subCommands: {
     grant: oidcGrantCommand,
   },
 })
 
-const migrateE2eeCommand = defineCommand({
-  meta: { name: "e2ee", description: "Encrypt all legacy vault content client-side" },
-  async run() {
-    const result = await migrateToE2ee((message) => console.error(message))
-    console.log(`Migrated and verified: ${result.vaults} vaults, ${result.items} items, ${result.files} files`)
-  },
-})
-
-const migrateCommand = defineCommand({
-  meta: { name: "migrate", description: "Run Vault data migrations" },
-  subCommands: { e2ee: migrateE2eeCommand },
-})
-
 const doctorCommand = defineCommand({
-  meta: { name: "doctor", description: "Check client encryption and migration state" },
+  meta: { name: "doctor", description: "Check client encryption state" },
   args: { ...formatFlag },
   async run({ args }) {
     const status = await doctorE2ee()
@@ -1104,8 +1090,8 @@ const doctorCommand = defineCommand({
     }
     console.log(`Account encryption: ${status.initialized ? "ready" : "not initialized"}`)
     console.log(`Local client key:   ${status.client_registered ? "registered" : "not registered"}`)
-    console.log(`Vaults:             ${status.encrypted_vaults} encrypted, ${status.legacy_vaults} legacy`)
-    console.log(`Items:              ${status.encrypted_items} encrypted, ${status.legacy_items} legacy`)
+    console.log(`Vaults:             ${status.vaults} encrypted`)
+    console.log(`Items:              ${status.items} encrypted`)
     console.log(`GitHub OIDC KMS:    ${status.kms_ready ? "ready" : "not ready"}`)
   },
 })
@@ -1236,7 +1222,7 @@ const importCommand = defineCommand({
 export const main = defineCommand({
   meta: {
     name: "cvlt",
-    description: "1Password-compatible secrets CLI for Circles Vault",
+    description: "1Password-style secrets CLI for Circles Vault",
   },
   args: {
     profile: { type: "string" as const, description: "Circles profile to use (default: shared current profile)" },
@@ -1254,7 +1240,6 @@ export const main = defineCommand({
     item: itemCommand,
     document: documentCommand,
     oidc: oidcCommand,
-    migrate: migrateCommand,
     doctor: doctorCommand,
     recover: recoverCommand,
     whoami: whoamiCommand,

@@ -16,7 +16,6 @@ import {
   e2eeDoctor,
   handleApi,
   handleSecretsApi,
-  migrateE2ee,
   startRecovery as startE2eeRecovery,
   uploadEncryptedFile,
   VaultApiError,
@@ -297,14 +296,6 @@ export async function uploadFile(
 export async function downloadFile(vaultId: string, itemId: string, fileId: string) {
   try {
     return await downloadEncryptedFile(await getConfig(), vaultId, itemId, fileId, fetchGithubOidcToken)
-  } catch (error) {
-    return fail(error)
-  }
-}
-
-export async function migrateToE2ee(progress?: (message: string) => void) {
-  try {
-    return await migrateE2ee(await getConfig(), fetchGithubOidcToken, progress)
   } catch (error) {
     return fail(error)
   }

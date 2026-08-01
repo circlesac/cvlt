@@ -56,13 +56,11 @@ type VaultRow = {
   created_at: string
   updated_at: string
   items: number
-  encrypted: boolean
-  format_version: number | null
-  overview: ContentEnvelope | null
-  wrapped_vault_key: AesEnvelope | null
+  format_version: number
+  overview: ContentEnvelope
+  wrapped_vault_key: AesEnvelope
   kms_wrapped_vault_key: RsaEnvelope | null
   coordinate: { provider: string; owner: string; repository: string | null } | null
-  migration_committed: boolean
 }
 
 type ItemRow = {
@@ -71,26 +69,21 @@ type ItemRow = {
   version: number
   created_at: string
   updated_at: string
-  encrypted: boolean
-  format_version: number | null
-  locator: string | null
-  overview: ContentEnvelope | null
-  details: ContentEnvelope | null
-  migration_committed: boolean
+  format_version: number
+  locator: string
+  overview: ContentEnvelope
+  details: ContentEnvelope
 }
 
 type FileRow = {
   id: string
   item_id: string
   vault_id: string
-  size: number
   created_at: string
-  encrypted: boolean
-  format_version: number | null
-  metadata: ContentEnvelope | null
-  ciphertext_size: number | null
+  format_version: number
+  metadata: ContentEnvelope
+  ciphertext_size: number
   content_path: string
-  migration_committed: boolean
 }
 
 type VaultOverview = {
@@ -117,38 +110,12 @@ type ItemDetails = {
   password_history: string[]
 }
 
-type FileMetadata = { name: string; content_type: string }
+type FileMetadata = { name: string; content_type: string; size: number }
 
 type CryptoContext = {
   status: Status
   device: DeviceKey | null
   accountKey: Uint8Array | null
-}
-
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalValue)
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entry]) => [key, canonicalValue(entry)])
-    )
-  }
-  return value
-}
-
-async function sha256Hex(value: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", value)
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
-}
-
-async function canonicalHash(value: unknown): Promise<string> {
-  return sha256Hex(new TextEncoder().encode(JSON.stringify(canonicalValue(value))))
-}
-
-async function legacyFileRevision(name: string, size: number, etag: string): Promise<string> {
-  return sha256Hex(new TextEncoder().encode(JSON.stringify({ name, size, etag })))
 }
 
 export class VaultApiError extends Error {
@@ -197,10 +164,6 @@ async function jsonRequest<T>(
   if (!response.ok) throw new VaultApiError(response.status, await errorMessage(response))
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
-}
-
-async function legacyRequest<T>(config: VaultConfig, path: string, options: RequestOptions = {}): Promise<T> {
-  return jsonRequest<T>(config, path, options)
 }
 
 function isOidc(): boolean {
@@ -462,7 +425,6 @@ async function createItem(
   fetchOidcToken: OidcTokenFetcher,
   id = generateOpaqueId()
 ): Promise<Record<string, unknown>> {
-  if (!vault.encrypted) throw new Error("Migrate this vault with cvlt migrate e2ee before writing")
   const key = await vaultKey(config, vault, fetchOidcToken)
   const payload = itemPayload(body)
   const row = await jsonRequest<ItemRow>(config, `/v2/vaults/${vault.id}/items`, {
@@ -534,7 +496,7 @@ async function encryptedFileInfo(
   return {
     id: row.id,
     name: metadata.name,
-    size: row.size,
+    size: metadata.size,
     content_type: metadata.content_type,
     content_path: row.content_path,
   }
@@ -549,12 +511,12 @@ export async function uploadEncryptedFile(
   content: Uint8Array,
   fetchOidcToken: OidcTokenFetcher
 ): Promise<Record<string, unknown>> {
+  if (content.byteLength > 10 * 1024 * 1024) throw new Error("File exceeds 10MB limit")
   const vault = await findVaultRow(config, vaultId)
-  if (!vault.encrypted) throw new Error("Migrate this vault before uploading files")
   const key = await vaultKey(config, vault, fetchOidcToken)
   const fileId = generateOpaqueId()
   const metadata = await encryptJson(
-    { name, content_type: contentType || "application/octet-stream" },
+    { name, content_type: contentType || "application/octet-stream", size: content.byteLength },
     key,
     `cvlt:v1:vault:${vaultId}:item:${itemId}:file:${fileId}:metadata`
   )
@@ -569,7 +531,6 @@ export async function uploadEncryptedFile(
       ...authHeaders(config),
       "Content-Type": "application/octet-stream",
       "X-CVLT-File-ID": fileId,
-      "X-CVLT-Plaintext-Size": String(content.byteLength),
       "X-CVLT-Metadata": Buffer.from(JSON.stringify(metadata)).toString("base64url"),
     },
     body: encrypted,
@@ -588,14 +549,6 @@ export async function downloadEncryptedFile(
   const vault = await findVaultRow(config, vaultId)
   const row = (await fileRows(config, vaultId, itemId)).find((file) => file.id === fileId)
   if (!row) throw new Error("File not found")
-  if (!row.encrypted) {
-    const info = await legacyRequest<Record<string, unknown>>(config, `/v1/vaults/${vaultId}/items/${itemId}/files/${fileId}`)
-    const response = await fetch(`${config.baseUrl}/v1/vaults/${vaultId}/items/${itemId}/files/${fileId}/content`, {
-      headers: authHeaders(config),
-    })
-    if (!response.ok) throw new VaultApiError(response.status, await errorMessage(response))
-    return { info, content: new Uint8Array(await response.arrayBuffer()) }
-  }
   const response = await fetch(`${config.baseUrl}/v2/vaults/${vaultId}/items/${itemId}/files/${fileId}/content`, {
     headers: authHeaders(config),
   })
@@ -685,18 +638,11 @@ export async function handleSecretsApi<T>(
   fetchOidcToken: OidcTokenFetcher
 ): Promise<{ handled: boolean; value?: T }> {
   if (!path.startsWith("/v1/read")) return { handled: false }
-  const status = await cryptoContext(config, false)
-  if (!status.status.initialized) return { handled: true, value: await legacyRequest<T>(config, path) }
+  const context = await cryptoContext(config, false)
+  if (!context.status.initialized) throw new Error("Account encryption is not initialized")
   const ref = new URL(path, "https://cvlt.local").searchParams.get("ref")
   if (!ref) throw new Error("Missing ref")
-  try {
-    return { handled: true, value: await coordinateRead(config, ref, fetchOidcToken) as T }
-  } catch (error) {
-    if (error instanceof VaultApiError && error.status === 404) {
-      return { handled: true, value: await legacyRequest<T>(config, path) }
-    }
-    throw error
-  }
+  return { handled: true, value: await coordinateRead(config, ref, fetchOidcToken) as T }
 }
 
 export async function handleApi<T>(
@@ -709,25 +655,22 @@ export async function handleApi<T>(
   const method = options.method || "GET"
   const parts = url.pathname.split("/").filter(Boolean)
   if (parts[0] !== "v1" || parts[1] !== "vaults") return { handled: false }
-  const context = await cryptoContext(config, method !== "GET")
-  if (!context.status.initialized && method === "GET") {
-    return { handled: true, value: await legacyRequest<T>(config, path, options) }
-  }
+  await cryptoContext(config, method !== "GET")
+
   if (parts.length === 2) {
-    if (method === "POST") return { handled: true, value: await createVault(config, options.body as Record<string, unknown>) as T }
+    if (method === "POST") {
+      return { handled: true, value: await createVault(config, options.body as Record<string, unknown>) as T }
+    }
     const rows = await vaultRows(config)
-    const legacy = rows.filter((row) => !row.encrypted)
-    const legacyValues = legacy.length ? await legacyRequest<Record<string, unknown>[]>(config, path) : []
-    const encrypted = await Promise.all(rows.filter((row) => row.encrypted).map((row) => encryptedVault(config, row, fetchOidcToken)))
-    return { handled: true, value: [...legacyValues.filter((value) => legacy.some((row) => row.id === value.id)), ...encrypted] as T }
+    return {
+      handled: true,
+      value: await Promise.all(rows.map((row) => encryptedVault(config, row, fetchOidcToken))) as T,
+    }
   }
+
   const vaultId = parts[2]!
   const vault = await findVaultRow(config, vaultId)
   if (parts.length === 3) {
-    if (!vault.encrypted) {
-      if (method === "PUT") throw new Error("Migrate this vault with cvlt migrate e2ee before editing")
-      return { handled: true, value: await legacyRequest<T>(config, path, options) }
-    }
     if (method === "DELETE") {
       await jsonRequest(config, `/v2/vaults/${vaultId}`, { method: "DELETE" })
       return { handled: true, value: undefined as T }
@@ -746,57 +689,53 @@ export async function handleApi<T>(
       }
       const row = await jsonRequest<VaultRow>(config, `/v2/vaults/${vaultId}`, {
         method: "PUT",
-        body: { overview: await encryptJson(overview, await vaultKey(config, vault, fetchOidcToken), `cvlt:v1:vault:${vaultId}:overview`) },
+        body: {
+          overview: await encryptJson(
+            overview,
+            await vaultKey(config, vault, fetchOidcToken),
+            `cvlt:v1:vault:${vaultId}:overview`
+          ),
+        },
       })
       return { handled: true, value: await encryptedVault(config, row, fetchOidcToken) as T }
     }
     return { handled: true, value: await encryptedVault(config, vault, fetchOidcToken) as T }
   }
+
   if (parts[3] !== "items") return { handled: false }
   if (parts.length === 4) {
-    if (!vault.encrypted) {
-      if (method === "POST") throw new Error("Migrate this vault with cvlt migrate e2ee before writing")
-      return { handled: true, value: await legacyRequest<T>(config, path, options) }
-    }
     if (method === "POST") {
-      return { handled: true, value: await createItem(config, vault, options.body as Record<string, unknown>, fetchOidcToken) as T }
+      return {
+        handled: true,
+        value: await createItem(config, vault, options.body as Record<string, unknown>, fetchOidcToken) as T,
+      }
     }
     const rows = await jsonRequest<ItemRow[]>(config, `/v2/vaults/${vaultId}/items`)
-    const legacyRows = rows.filter((row) => !row.encrypted)
-    const legacyValues = legacyRows.length
-      ? await legacyRequest<Record<string, unknown>[]>(config, `/v1/vaults/${vaultId}/items`)
-      : []
-    const encrypted = await Promise.all(rows.filter((row) => row.encrypted).map((row) => encryptedItem(config, row, vault, fetchOidcToken)))
-    const merged = [...legacyValues.filter((value) => legacyRows.some((row) => row.id === value.id)), ...encrypted]
-    return { handled: true, value: filterItems(merged, url.searchParams) as T }
+    const items = await Promise.all(rows.map((row) => encryptedItem(config, row, vault, fetchOidcToken)))
+    return { handled: true, value: filterItems(items, url.searchParams) as T }
   }
+
   const itemId = parts[4]!
   if (parts[5] === "files") {
-    if (!vault.encrypted) return { handled: true, value: await legacyRequest<T>(config, path, options) }
     if (parts.length === 6 && method === "GET") {
       const rows = await fileRows(config, vaultId, itemId)
-      const legacyRows = rows.filter((row) => !row.encrypted)
-      const legacyValues = legacyRows.length
-        ? await legacyRequest<Record<string, unknown>[]>(config, `/v1/vaults/${vaultId}/items/${itemId}/files`)
-        : []
-      const encrypted = await Promise.all(rows.filter((row) => row.encrypted).map((row) => encryptedFileInfo(config, row, vault, fetchOidcToken)))
-      return { handled: true, value: [...legacyValues.filter((value) => legacyRows.some((row) => row.id === value.id)), ...encrypted] as T }
+      return {
+        handled: true,
+        value: await Promise.all(rows.map((row) => encryptedFileInfo(config, row, vault, fetchOidcToken))) as T,
+      }
     }
     return { handled: false }
   }
+
   const row = await jsonRequest<ItemRow>(config, `/v2/vaults/${vaultId}/items/${itemId}`)
-  if (!row.encrypted) {
-    if (method === "PUT" || parts[5] === "move") {
-      throw new Error("Migrate this item with cvlt migrate e2ee before writing")
-    }
-    return { handled: true, value: await legacyRequest<T>(config, path, options) }
-  }
   if (parts[5] === "move" && method === "POST") {
     const destinationId = String((options.body as Record<string, unknown>).vault)
     const destination = await findVaultRow(config, destinationId)
     const current = await encryptedItem(config, row, vault, fetchOidcToken)
     const attachments = await fileRows(config, vaultId, itemId)
-    const contents = await Promise.all(attachments.map((file) => downloadEncryptedFile(config, vaultId, itemId, file.id, fetchOidcToken)))
+    const contents = await Promise.all(
+      attachments.map((file) => downloadEncryptedFile(config, vaultId, itemId, file.id, fetchOidcToken))
+    )
     const created = await createItem(config, destination, current, fetchOidcToken)
     for (const file of contents) {
       await uploadEncryptedFile(
@@ -817,305 +756,37 @@ export async function handleApi<T>(
     return { handled: true, value: undefined as T }
   }
   if (method === "PUT") {
-    return { handled: true, value: await updateItem(config, vault, row, options.body as Record<string, unknown>, fetchOidcToken) as T }
+    return {
+      handled: true,
+      value: await updateItem(config, vault, row, options.body as Record<string, unknown>, fetchOidcToken) as T,
+    }
   }
   return { handled: true, value: await encryptedItem(config, row, vault, fetchOidcToken) as T }
-}
-
-async function migrateFile(
-  config: VaultConfig,
-  vault: VaultRow,
-  vaultKeyBytes: Uint8Array,
-  itemId: string,
-  file: { id: string; name: string; size: number; content_path: string }
-) {
-  const response = await fetch(`${config.baseUrl}/${file.content_path}`, { headers: authHeaders(config) })
-  if (!response.ok) throw new VaultApiError(response.status, await errorMessage(response))
-  const etag = response.headers.get("ETag")
-  if (!etag) throw new Error(`Legacy file ${file.id} has no ETag`)
-  const content = new Uint8Array(await response.arrayBuffer())
-  if (content.byteLength !== file.size) throw new Error(`Legacy file size changed for ${file.id}`)
-  const contentType = response.headers.get("Content-Type") || "application/octet-stream"
-  const revision = await legacyFileRevision(file.name, file.size, etag)
-  const metadata = await encryptJson(
-    { name: file.name, content_type: contentType },
-    vaultKeyBytes,
-    `cvlt:v1:vault:${vault.id}:item:${itemId}:file:${file.id}:metadata`
-  )
-  const encrypted = serializeEncryptedBytes(await encryptContent(
-    content,
-    vaultKeyBytes,
-    `cvlt:v1:vault:${vault.id}:item:${itemId}:file:${file.id}:content`
-  ))
-  const migrated = await fetch(`${config.baseUrl}/v2/migrate/vaults/${vault.id}/items/${itemId}/files/${file.id}`, {
-    method: "POST",
-    headers: {
-      ...authHeaders(config),
-      "Content-Type": "application/octet-stream",
-      "If-Match": etag,
-      "X-CVLT-Legacy-Revision": revision,
-      "X-CVLT-Metadata": Buffer.from(JSON.stringify(metadata)).toString("base64url"),
-    },
-    body: encrypted,
-  })
-  if (!migrated.ok) throw new VaultApiError(migrated.status, await errorMessage(migrated))
-  const verifyResponse = await fetch(
-    `${config.baseUrl}/v2/vaults/${vault.id}/items/${itemId}/files/${file.id}/content`,
-    { headers: authHeaders(config) }
-  )
-  if (!verifyResponse.ok) throw new VaultApiError(verifyResponse.status, await errorMessage(verifyResponse))
-  const verifiedContent = await decryptContent(
-    parseEncryptedBytes(new Uint8Array(await verifyResponse.arrayBuffer())),
-    vaultKeyBytes,
-    `cvlt:v1:vault:${vault.id}:item:${itemId}:file:${file.id}:content`
-  )
-  if (await sha256Hex(verifiedContent) !== await sha256Hex(content)) {
-    throw new Error(`Migration verification failed for file ${file.id}`)
-  }
-  const verifiedRow = (await fileRows(config, vault.id, itemId)).find((candidate) => candidate.id === file.id)
-  if (!verifiedRow?.encrypted || !verifiedRow.metadata) {
-    throw new Error(`Migration verification failed for file ${file.id}`)
-  }
-  const verifiedMetadata = await decryptJson<FileMetadata>(
-    verifiedRow.metadata,
-    vaultKeyBytes,
-    `cvlt:v1:vault:${vault.id}:item:${itemId}:file:${file.id}:metadata`
-  )
-  if (await canonicalHash(verifiedMetadata) !== await canonicalHash({ name: file.name, content_type: contentType })) {
-    throw new Error(`Migration verification failed for file metadata ${file.id}`)
-  }
-  const committed = await fetch(
-    `${config.baseUrl}/v2/migrate/vaults/${vault.id}/items/${itemId}/files/${file.id}/commit`,
-    {
-      method: "POST",
-      headers: {
-        ...authHeaders(config),
-        "If-Match": etag,
-        "X-CVLT-Legacy-Revision": revision,
-      },
-    }
-  )
-  if (!committed.ok) throw new VaultApiError(committed.status, await errorMessage(committed))
-  const committedRow = (await fileRows(config, vault.id, itemId)).find((candidate) => candidate.id === file.id)
-  if (!committedRow?.migration_committed) {
-    throw new Error(`Migration commit failed for file ${file.id}`)
-  }
-  const legacyResponse = await fetch(`${config.baseUrl}/${file.content_path}`, { headers: authHeaders(config) })
-  if (legacyResponse.status !== 404) {
-    throw new Error(`Legacy file content still exists after migration for ${file.id}`)
-  }
-}
-
-export async function migrateE2ee(
-  config: VaultConfig,
-  fetchOidcToken: OidcTokenFetcher,
-  progress: (message: string) => void = () => {}
-): Promise<{ vaults: number; items: number; files: number }> {
-  const context = await cryptoContext(config, true)
-  if (!context.accountKey) throw new Error("Migration requires an interactive account key")
-  const migrationRows = (await vaultRows(config)).filter((row) => !row.migration_committed)
-  let vaultCount = 0
-  let itemCount = 0
-  let fileCount = 0
-  for (let row of migrationRows) {
-    const vaultId = row.id
-    const legacy = await legacyRequest<Record<string, unknown>>(config, `/v1/vaults/${vaultId}`)
-    const expectedAttributeVersion = row.attribute_version
-    const expectedContentVersion = row.content_version
-    const expectedVaultOverview: VaultOverview = {
-      name: String(legacy.name),
-      description: String(legacy.description ?? ""),
-      type: String(legacy.type ?? "USER_CREATED"),
-      ...(legacy.password_rotation_days !== undefined
-        ? { password_rotation_days: legacy.password_rotation_days as number | null }
-        : {}),
-    }
-    let key: Uint8Array
-    if (!row.encrypted) {
-      key = randomKey()
-      const coordinate = parseVaultCoordinate(expectedVaultOverview.name)
-      const kmsWrapped = context.status.kms.public_key_pem
-        ? await wrapVaultKeyForKms(key, vaultId, context.status.kms.public_key_pem)
-        : null
-      await jsonRequest(config, `/v2/migrate/vaults/${vaultId}/prepare`, {
-        method: "POST",
-        body: {
-          overview: await encryptJson(expectedVaultOverview, key, `cvlt:v1:vault:${vaultId}:overview`),
-          wrapped_vault_key: await wrapKey(
-            key,
-            context.accountKey,
-            `cvlt:v1:account:${context.status.account}:vault:${vaultId}`
-          ),
-          kms_wrapped_vault_key: kmsWrapped,
-          coordinate: coordinate
-            ? { provider: coordinate.provider, owner: coordinate.owner, repository: coordinate.repo }
-            : null,
-          expected_attribute_version: expectedAttributeVersion,
-          expected_content_version: expectedContentVersion,
-        },
-      })
-      row = await findVaultRow(config, vaultId)
-      vaultKeys.set(`${config.baseUrl}:${vaultId}`, key)
-      progress(`vault ${vaultId}: key prepared`)
-    } else {
-      key = await vaultKey(config, row, fetchOidcToken)
-      if (!row.overview) throw new Error(`Vault ${vaultId} has no encrypted overview`)
-      const preparedVaultOverview = await decryptJson<VaultOverview>(
-        row.overview,
-        key,
-        `cvlt:v1:vault:${vaultId}:overview`
-      )
-      if (await canonicalHash(preparedVaultOverview) !== await canonicalHash(expectedVaultOverview)) {
-        throw new Error(`Prepared vault content no longer matches legacy vault ${vaultId}`)
-      }
-    }
-    const rows = await jsonRequest<ItemRow[]>(config, `/v2/vaults/${vaultId}/items`)
-    const expectedFileCounts = new Map<string, number>()
-    for (const itemRow of rows) {
-      expectedFileCounts.set(itemRow.id, (await fileRows(config, vaultId, itemRow.id)).length)
-    }
-    const legacyItems = rows.filter((item) => !item.migration_committed)
-    for (const legacyItemRow of legacyItems) {
-      const item = await legacyRequest<Record<string, unknown>>(
-        config,
-        `/v1/vaults/${vaultId}/items/${legacyItemRow.id}`
-      )
-      const expectedItemVersion = Number(item.version ?? legacyItemRow.version)
-      if (!Number.isInteger(expectedItemVersion)) {
-        throw new Error(`Legacy item ${legacyItemRow.id} has no version`)
-      }
-      const payload = itemPayload(item)
-      await jsonRequest(config, `/v2/migrate/vaults/${vaultId}/items/${legacyItemRow.id}`, {
-        method: "POST",
-        body: {
-          expected_version: expectedItemVersion,
-          locator: await itemLocator(key, payload.overview.title),
-          overview: await encryptJson(
-            payload.overview,
-            key,
-            `cvlt:v1:vault:${vaultId}:item:${legacyItemRow.id}:overview`
-          ),
-          details: await encryptJson(
-            payload.details,
-            key,
-            `cvlt:v1:vault:${vaultId}:item:${legacyItemRow.id}:details`
-          ),
-        },
-      })
-      const verifyRow = await jsonRequest<ItemRow>(config, `/v2/vaults/${vaultId}/items/${legacyItemRow.id}`)
-      if (!verifyRow.overview || !verifyRow.details) {
-        throw new Error(`Migration verification failed for item ${legacyItemRow.id}`)
-      }
-      const verifiedPayload = {
-        overview: await decryptJson<ItemOverview>(
-          verifyRow.overview,
-          key,
-          `cvlt:v1:vault:${vaultId}:item:${legacyItemRow.id}:overview`
-        ),
-        details: await decryptJson<ItemDetails>(
-          verifyRow.details,
-          key,
-          `cvlt:v1:vault:${vaultId}:item:${legacyItemRow.id}:details`
-        ),
-      }
-      if (await canonicalHash(verifiedPayload) !== await canonicalHash(payload)) {
-        throw new Error(`Migration verification failed for item ${legacyItemRow.id}`)
-      }
-      const legacyFiles = await legacyRequest<{ id: string; name: string; size: number; content_path: string }[]>(
-        config,
-        `/v1/vaults/${vaultId}/items/${legacyItemRow.id}/files`
-      )
-      const currentFiles = await fileRows(config, vaultId, legacyItemRow.id)
-      for (const file of legacyFiles.filter((candidate) => !currentFiles.some((row) => row.id === candidate.id && row.migration_committed))) {
-        await migrateFile(config, row, key, legacyItemRow.id, file)
-        fileCount++
-        progress(`file ${fileCount}: encrypted, hash verified, and legacy object removed`)
-      }
-      await jsonRequest(config, `/v2/migrate/vaults/${vaultId}/items/${legacyItemRow.id}/commit`, {
-        method: "POST",
-        body: { expected_version: expectedItemVersion },
-      })
-      const committedItem = await jsonRequest<ItemRow>(config, `/v2/vaults/${vaultId}/items/${legacyItemRow.id}`)
-      if (!committedItem.migration_committed) {
-        throw new Error(`Migration commit failed for item ${legacyItemRow.id}`)
-      }
-      itemCount++
-      progress(`item ${itemCount}: canonical hash verified and legacy columns scrubbed`)
-    }
-    const verifiedRows = await jsonRequest<ItemRow[]>(config, `/v2/vaults/${vaultId}/items`)
-    if (
-      verifiedRows.length !== rows.length
-      || verifiedRows.some((item) => !item.encrypted || !item.migration_committed)
-    ) {
-      throw new Error(`Migration item count verification failed for vault ${vaultId}`)
-    }
-    for (const itemRow of verifiedRows) {
-      const verifiedFiles = await fileRows(config, vaultId, itemRow.id)
-      if (
-        verifiedFiles.length !== expectedFileCounts.get(itemRow.id)
-        || verifiedFiles.some((file) => !file.encrypted || !file.migration_committed)
-      ) {
-        throw new Error(`Migration file count verification failed for item ${itemRow.id}`)
-      }
-    }
-    const preparedVault = await findVaultRow(config, vaultId)
-    if (!preparedVault.encrypted || !preparedVault.overview) {
-      throw new Error(`Migration verification failed for vault ${vaultId}`)
-    }
-    const preparedVaultOverview = await decryptJson<VaultOverview>(
-      preparedVault.overview,
-      key,
-      `cvlt:v1:vault:${vaultId}:overview`
-    )
-    if (await canonicalHash(preparedVaultOverview) !== await canonicalHash(expectedVaultOverview)) {
-      throw new Error(`Migration canonical hash verification failed for vault ${vaultId}`)
-    }
-    await jsonRequest(config, `/v2/migrate/vaults/${vaultId}/commit`, {
-      method: "POST",
-      body: {
-        expected_attribute_version: expectedAttributeVersion,
-        expected_content_version: expectedContentVersion,
-      },
-    })
-    const verifiedVault = await findVaultRow(config, vaultId)
-    if (!verifiedVault.encrypted || !verifiedVault.migration_committed || !verifiedVault.overview) {
-      throw new Error(`Migration verification failed for vault ${vaultId}`)
-    }
-    vaultCount++
-  }
-  return { vaults: vaultCount, items: itemCount, files: fileCount }
 }
 
 export async function e2eeDoctor(config: VaultConfig): Promise<{
   initialized: boolean
   client_registered: boolean
-  encrypted_vaults: number
-  legacy_vaults: number
-  encrypted_items: number
-  legacy_items: number
+  vaults: number
+  items: number
   kms_ready: boolean
 }> {
   const context = await cryptoContext(config, false)
   const rows = await vaultRows(config)
-  let encryptedItems = 0
-  let legacyItems = 0
+  let items = 0
   for (const row of rows) {
-    const items = await jsonRequest<ItemRow[]>(config, `/v2/vaults/${row.id}/items`)
-    encryptedItems += items.filter((item) => item.encrypted && item.migration_committed).length
-    legacyItems += items.filter((item) => !item.migration_committed).length
+    items += (await jsonRequest<ItemRow[]>(config, `/v2/vaults/${row.id}/items`)).length
   }
   return {
     initialized: context.status.initialized,
     client_registered: isOidc() || !!context.status.client,
-    encrypted_vaults: rows.filter((row) => row.encrypted && row.migration_committed).length,
-    legacy_vaults: rows.filter((row) => !row.migration_committed).length,
-    encrypted_items: encryptedItems,
-    legacy_items: legacyItems,
+    vaults: rows.length,
+    items,
     kms_ready: !!(
       context.status.kms.public_key_pem
       && context.status.kms.wif_audience
       && context.status.kms.key_version
-      && rows.filter((row) => row.encrypted && row.migration_committed).every((row) => row.kms_wrapped_vault_key)
+      && rows.every((row) => row.kms_wrapped_vault_key)
     ),
   }
 }

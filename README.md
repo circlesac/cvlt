@@ -4,7 +4,7 @@
 
 `cvlt` is the official CLI for [Circles Vault](https://github.com/circlesac/vault) — a secrets manager on Cloudflare Workers with two parallel address surfaces:
 
-- **`op://<vault>/<item>/<field>`** — 1Password Connect-compatible. Most workflows that use `op read`, `op inject`, or `op run` work unchanged by setting `OP_CONNECT_HOST`.
+- **`op://<vault>/<item>/<field>`** — 1Password-style. The `cvlt read`, `inject`, and `run` workflows preserve the familiar command and reference shape while encrypting locally.
 - **`vlt://<provider>/<owner>[/<repo>]/<NAME>`** — flat GitHub-Secrets-style key→value secrets, addressed by GitHub coordinates. The repo segment selects the scope: present → project secret, absent → owner-global. Designed to replace GitHub Actions secrets (the coordinate is identical to the OIDC `repository` claim).
 
 `cvlt read`, `cvlt inject`, and `cvlt run` accept both schemes anywhere a reference appears.
@@ -69,7 +69,7 @@ cvlt run --env-file=.cvlt.env -- ./deploy.sh
 # .cvlt.env — safe to commit; values are fetched at runtime
 DB_PASSWORD=vlt://github.com/acme/api/DB_PASSWORD
 OPENAI_KEY=vlt://github.com/acme/OPENAI_KEY
-LEGACY_PASS=op://my-vault/db-credentials/password
+ACCOUNT_PASSWORD=op://my-vault/db-credentials/password
 ```
 
 `cvlt run` resolves `op://` / `vlt://` references found in `--env-file` entries and the process env, then exec's the command with the actual values.
@@ -103,13 +103,12 @@ cvlt document list --vault prod-secrets
 cvlt document get "TLS Cert" --vault prod-secrets -o ./cert.pem
 ```
 
-### Client encryption and migration
+### Client encryption and recovery
 
-All new vault content is encrypted locally before upload. Existing v1 data remains readable while it is migrated, but `cvlt` refuses to write new plaintext into an unmigrated vault.
+All vault content is encrypted locally before upload. The server stores only opaque ciphertext, wrapped keys, keyed locators, and control-plane metadata; there is no plaintext compatibility path.
 
 ```bash
-cvlt doctor                       # encryption, migration, and GitHub OIDC KMS state
-cvlt migrate e2ee --org circlesac # resumable; verifies before deleting each legacy copy
+cvlt doctor # account encryption, installation key, and GitHub OIDC KMS state
 ```
 
 The first interactive initialization prints a high-entropy recovery code once. Store it outside Vault. The installation private key is saved in macOS Keychain, Windows DPAPI, Linux Secret Service, or a passphrase-encrypted local file when no OS store exists.
@@ -168,7 +167,7 @@ cvlt vault delete github.com/circlesac/my-app --org circlesac  # revokes CI acce
 
 Owner-global (`github.com/circlesac`) needs no grant — every registered repo of that owner reads it via `project > global`, and org members write to it with `cvlt item create --vault github.com/circlesac --org circlesac …`.
 
-The legacy `cvlt oidc grant create|list|get|edit|delete` commands remain for op://-vault-scoped or org-wildcard (`owner/*`) grants.
+The advanced `cvlt oidc grant create|list|get|edit|delete` commands remain for op://-vault-scoped or org-wildcard (`owner/*`) grants.
 
 `vault create / edit / delete`, `oidc grant *`, and `whoami` require operator (user JWT) auth. OIDC tokens from GitHub Actions are scoped to data-plane operations (read secrets/items, write if allowed) and cannot manage vaults or grants regardless of role.
 
