@@ -1,0 +1,35 @@
+name: Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Install Linux Secret Service
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libsecret-tools
+      - name: Test macOS and Windows
+        if: runner.os != 'Linux'
+        env:
+          CVLT_TEST_OS_KEYSTORE: "1"
+        run: bun test src/
+      - name: Test Linux Secret Service
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -lc '
+            printf "%s" "test-keyring-password" | gnome-keyring-daemon --unlock >/dev/null
+            export CVLT_TEST_OS_KEYSTORE=1
+            bun test src/
+          '

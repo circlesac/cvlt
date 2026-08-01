@@ -82,11 +82,14 @@ function windowsWrite(account: string, value: string): boolean {
 }
 
 export function promptSecret(prompt: string): string {
+  const supplied = process.env.CVLT_KEYSTORE_PASSPHRASE
+  if (supplied) {
+    if (supplied.length < 12) throw new Error("Key-store passphrase must be at least 12 characters")
+    return supplied
+  }
   if (!process.stdin.isTTY) {
     throw new Error("No OS credential store is available; run cvlt in a terminal to unlock the encrypted key file")
   }
-  const supplied = process.env.CVLT_KEYSTORE_PASSPHRASE
-  if (supplied) return supplied
   process.stderr.write(prompt)
   const tty = openSync("/dev/tty", "r+")
   spawnSync("stty", ["-echo"], { stdio: [tty, tty, tty] })
@@ -118,7 +121,7 @@ async function fallbackKey(passphrase: string, salt: Uint8Array): Promise<Crypto
   )
 }
 
-async function fallbackRead(account: string): Promise<string | null> {
+export async function readEncryptedKeyFile(account: string): Promise<string | null> {
   const path = configPath(account)
   if (!existsSync(path)) return null
   const stored = JSON.parse(readFileSync(path, "utf8")) as { salt: string; nonce: string; ciphertext: string }
@@ -131,7 +134,7 @@ async function fallbackRead(account: string): Promise<string | null> {
   return decoder.decode(plaintext)
 }
 
-async function fallbackWrite(account: string, value: string): Promise<boolean> {
+export async function writeEncryptedKeyFile(account: string, value: string): Promise<boolean> {
   const path = configPath(account)
   const passphrase = promptSecret("Create vault key-store passphrase: ")
   const salt = crypto.getRandomValues(new Uint8Array(16))
@@ -153,7 +156,7 @@ export async function loadDeviceKey(origin: string): Promise<DeviceKey | null> {
   if (process.platform === "darwin") value = macRead(account)
   else if (process.platform === "win32") value = windowsRead(account)
   else if (linuxAvailable()) value = linuxRead(account)
-  if (value === null) value = await fallbackRead(account)
+  if (value === null) value = await readEncryptedKeyFile(account)
   return value ? JSON.parse(value) as DeviceKey : null
 }
 
@@ -164,6 +167,6 @@ export async function saveDeviceKey(origin: string, key: DeviceKey): Promise<voi
   if (process.platform === "darwin") stored = macWrite(account, value)
   else if (process.platform === "win32") stored = windowsWrite(account, value)
   else if (linuxAvailable()) stored = linuxWrite(account, value)
-  if (!stored) stored = await fallbackWrite(account, value)
+  if (!stored) stored = await writeEncryptedKeyFile(account, value)
   if (!stored) throw new Error("Unable to store the vault client key securely")
 }
