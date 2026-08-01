@@ -965,10 +965,12 @@ export async function completeRecovery(
   const accountKey = await openRecoveryEnvelope(verified.recovery, recoveryCode, status.account)
   const device = await generateDeviceKey()
   await saveDeviceKey(new URL(config.baseUrl).origin, device)
+  const replacementRecovery = await createRecoveryEnvelope(accountKey, status.account)
   await jsonRequest(config, "/v2/recovery/complete", {
     method: "POST",
     body: {
       recovery_token: verified.recovery_token,
+      recovery: replacementRecovery.envelope,
       client: {
         id: device.clientId,
         public_key: device.publicKey,
@@ -977,5 +979,7 @@ export async function completeRecovery(
       },
     },
   })
+  process.stderr.write("\nNew Circles Vault recovery code (the previous code and clients are revoked):\n")
+  process.stderr.write(`${replacementRecovery.code}\n\n`)
   resetE2eeCaches()
 }

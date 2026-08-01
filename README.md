@@ -121,7 +121,7 @@ cvlt recover start --org circlesac
 cvlt recover complete 12345678 --org circlesac
 ```
 
-The second command prompts for the recovery code without placing it in shell history. Email codes last 10 minutes, allow five attempts, and cannot be resent while active.
+The second command prompts for the recovery code without placing it in shell history. A successful recovery revokes every previous installation and recovery code, then prints a replacement recovery code once. Email codes last 10 minutes, allow five attempts, and cannot be resent while active.
 
 ### GitHub-coordinate secrets (vlt://)
 
