@@ -73,4 +73,14 @@ describe("applyFieldAssignments", () => {
       { id: "alias", label: "alias", value: "wallet", type: "STRING" },
     ])
   })
+
+  it("marks conventional password fields for history tracking", () => {
+    expect(applyFieldAssignments([], ["password=first"])).toEqual([
+      { id: "password", label: "password", value: "first", type: "CONCEALED", purpose: "PASSWORD" },
+    ])
+    expect(applyFieldAssignments(
+      [{ id: "password", label: "password", value: "first", type: "CONCEALED" }],
+      ["password=second"]
+    )[0]?.purpose).toBe("PASSWORD")
+  })
 })
