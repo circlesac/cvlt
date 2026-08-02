@@ -27,7 +27,7 @@
     "url": "https://github.com/circlesac/cvlt-cli.git"
   },
   "dependencies": {
-    "@circlesac/credentials": "^1.1.0",
+    "@circlesac/credentials": "^1.2.0",
     "citty": "^0.2.1"
   },
   "devDependencies": {

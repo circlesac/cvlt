@@ -28,7 +28,7 @@ npm install -g @circlesac/vlt-cli
 
 1. **`OP_CONNECT_HOST` + `OP_CONNECT_TOKEN`** — drop-in for `op` CLI; useful when you already have a token.
 2. **`OP_CONNECT_HOST` + GitHub Actions OIDC** — if `ACTIONS_ID_TOKEN_REQUEST_URL`/`_TOKEN` are present (workflow has `id-token: write`), `cvlt` fetches a short-lived OIDC token automatically. No stored secrets.
-3. **Shared Circles credentials** (`~/.crcl/config` + `~/.crcl/credentials`) — interactive user. Plain `crcl login` selects the verified email profile shared by every Circles client. Legacy `~/.config/crcl` profiles remain readable through automatic migration.
+3. **Shared Circles credentials** (`~/.crcl/config` + `~/.crcl/credentials`) — interactive user. The first `crcl login` establishes the shared current profile; later identities are selected explicitly with `crcl use`. Legacy `~/.config/crcl` profiles remain readable through automatic migration.
 
 `cvlt whoami` shows the resolved host + account (`personal` by default, or `org:<slug>` with `--org`/`CRCL_ORG`).
 
