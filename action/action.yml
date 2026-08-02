@@ -17,11 +17,17 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install cvlt
+    - name: Configure cvlt
       shell: bash
       run: |
         if ! command -v cvlt >/dev/null 2>&1; then
-          npm install -g @circlesac/vlt-cli
+          mkdir -p "$RUNNER_TEMP/cvlt-bin"
+          printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'exec npx --yes --package=@circlesac/vlt-cli@latest -- cvlt "$@"' \
+            > "$RUNNER_TEMP/cvlt-bin/cvlt"
+          chmod +x "$RUNNER_TEMP/cvlt-bin/cvlt"
+          echo "$RUNNER_TEMP/cvlt-bin" >> "$GITHUB_PATH"
         fi
 
     - name: Configure endpoint
