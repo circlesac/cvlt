@@ -93,6 +93,23 @@ describe("injectTemplate", () => {
   it("leaves non-reference braces alone", async () => {
     expect(await injectTemplate("X={{not-a-ref}}", resolver)).toBe("X={{not-a-ref}}")
   })
+
+  it("resolves unique references concurrently", async () => {
+    const calls: string[] = []
+    const out = await injectTemplate(
+      "A={{op://v/i/f}} B={{op://v/i/f}} C={{vlt://github.com/circlesac/API_KEY}}",
+      async (ref) => {
+        calls.push(ref)
+        await Bun.sleep(10)
+        return FAKE[ref]!
+      }
+    )
+    expect(out).toBe("A=op-value B=op-value C=cvlt-value")
+    expect(calls.sort()).toEqual([
+      "op://v/i/f",
+      "vlt://github.com/circlesac/API_KEY",
+    ])
+  })
 })
 
 describe("parseEnvFile", () => {
@@ -125,6 +142,30 @@ describe("buildRunEnv", () => {
       resolver
     )
     expect(env.DB_PASSWORD).toBe("project-value")
+  })
+
+  it("resolves each unique merged reference once", async () => {
+    const calls: string[] = []
+    const env = await buildRunEnv(
+      {
+        TOKEN: "op://v/i/f",
+        TOKEN_COPY: "op://v/i/f",
+        DB_PASSWORD: "stale",
+      },
+      "DB_PASSWORD=vlt://github.com/circlesac/app/DB_PASSWORD",
+      async (ref) => {
+        calls.push(ref)
+        await Bun.sleep(10)
+        return FAKE[ref]!
+      }
+    )
+    expect(env.TOKEN).toBe("op-value")
+    expect(env.TOKEN_COPY).toBe("op-value")
+    expect(env.DB_PASSWORD).toBe("project-value")
+    expect(calls.sort()).toEqual([
+      "op://v/i/f",
+      "vlt://github.com/circlesac/app/DB_PASSWORD",
+    ])
   })
 })
 

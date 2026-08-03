@@ -9,7 +9,15 @@ import { describe, it, expect, beforeEach, afterEach, mock } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { _resetOidcCache, fetchGithubOidcToken, getConfig, hasGithubOidcEnv, setOverrides } from "./api"
+import {
+  _resetOidcCache,
+  fetchGithubOidcToken,
+  getConfig,
+  hasGithubOidcEnv,
+  resolveItem,
+  resolveVault,
+  setOverrides,
+} from "./api"
 
 // Build a minimal valid JWT structure (header.payload.signature) so callers
 // that try to parse `exp` from the payload succeed.
@@ -55,6 +63,16 @@ describe("hasGithubOidcEnv", () => {
         ACTIONS_ID_TOKEN_REQUEST_TOKEN: "abc",
       } as NodeJS.ProcessEnv)
     ).toBe(false)
+  })
+})
+
+describe("opaque ID resolution", () => {
+  it("does not make lookup requests for vault and item IDs", async () => {
+    const vaultId = "01j00000000000000000000001"
+    const itemId = "01j00000000000000000000002"
+    expect(await resolveVault(vaultId)).toBe(vaultId)
+    expect(await resolveItem(vaultId, itemId)).toBe(itemId)
+    expect(fetchSpy.mock.calls).toHaveLength(0)
   })
 })
 

@@ -126,12 +126,76 @@ export class VaultApiError extends Error {
 }
 
 const cryptoContexts = new Map<string, CryptoContext>()
+const pendingCryptoContexts = new Map<string, Promise<CryptoContext>>()
+const pendingBootstraps = new Map<string, Promise<CryptoContext>>()
 const vaultKeys = new Map<string, Uint8Array>()
+const pendingVaultKeys = new Map<string, Promise<Uint8Array>>()
+const vaultRowLists = new Map<string, Promise<VaultRow[]>>()
+const vaultRowsById = new Map<string, VaultRow>()
+const itemRowLists = new Map<string, Promise<ItemRow[]>>()
+const itemRowsById = new Map<string, ItemRow>()
 const encoder = new TextEncoder()
 
 export function resetE2eeCaches() {
   cryptoContexts.clear()
+  pendingCryptoContexts.clear()
+  pendingBootstraps.clear()
   vaultKeys.clear()
+  pendingVaultKeys.clear()
+  vaultRowLists.clear()
+  vaultRowsById.clear()
+  itemRowLists.clear()
+  itemRowsById.clear()
+}
+
+function configCacheKey(config: VaultConfig): string {
+  return `${config.baseUrl}\0${config.token}`
+}
+
+function vaultRowCacheKey(config: VaultConfig, vaultId: string): string {
+  return `${configCacheKey(config)}\0${vaultId}`
+}
+
+function itemRowCacheKey(config: VaultConfig, vaultId: string, itemId: string): string {
+  return `${vaultRowCacheKey(config, vaultId)}\0${itemId}`
+}
+
+function rememberVaultRow(config: VaultConfig, row: VaultRow): VaultRow {
+  vaultRowsById.set(vaultRowCacheKey(config, row.id), row)
+  return row
+}
+
+function rememberItemRow(config: VaultConfig, row: ItemRow): ItemRow {
+  itemRowsById.set(itemRowCacheKey(config, row.vault_id, row.id), row)
+  return row
+}
+
+function invalidateVaultList(config: VaultConfig): void {
+  vaultRowLists.delete(configCacheKey(config))
+}
+
+function invalidateVaultRow(config: VaultConfig, vaultId: string): void {
+  vaultRowsById.delete(vaultRowCacheKey(config, vaultId))
+  invalidateVaultList(config)
+}
+
+function invalidateItemList(config: VaultConfig, vaultId: string): void {
+  itemRowLists.delete(vaultRowCacheKey(config, vaultId))
+}
+
+function removeVaultRow(config: VaultConfig, vaultId: string): void {
+  invalidateVaultRow(config, vaultId)
+  vaultKeys.delete(vaultRowCacheKey(config, vaultId))
+  pendingVaultKeys.delete(vaultRowCacheKey(config, vaultId))
+  invalidateItemList(config, vaultId)
+  for (const key of itemRowsById.keys()) {
+    if (key.startsWith(`${vaultRowCacheKey(config, vaultId)}\0`)) itemRowsById.delete(key)
+  }
+}
+
+function removeItemRow(config: VaultConfig, vaultId: string, itemId: string): void {
+  itemRowsById.delete(itemRowCacheKey(config, vaultId, itemId))
+  invalidateItemList(config, vaultId)
 }
 
 function authHeaders(config: VaultConfig, device?: DeviceKey | null): Record<string, string> {
@@ -181,7 +245,19 @@ async function bootstrap(config: VaultConfig, device: DeviceKey | null): Promise
   const installation = device ?? await generateDeviceKey()
   if (!device) await saveDeviceKey(new URL(config.baseUrl).origin, installation)
   const status = await readStatus(config, installation)
-  if (status.initialized) return cryptoContext(config, false)
+  if (status.initialized) {
+    if (!status.client) {
+      throw new Error("This installation is not registered. Run cvlt recover after a fresh crcl login")
+    }
+    const accountKey = await unwrapAccountKeyForDevice(
+      status.client.wrapped_account_key,
+      installation.privateKey,
+      status.account
+    )
+    const context = { status, device: installation, accountKey }
+    cryptoContexts.set(configCacheKey(config), context)
+    return context
+  }
   const accountKey = randomKey()
   const recovery = await createRecoveryEnvelope(accountKey, status.account)
   await jsonRequest(config, "/v1/bootstrap", {
@@ -200,35 +276,66 @@ async function bootstrap(config: VaultConfig, device: DeviceKey | null): Promise
   process.stderr.write(`${recovery.code}\n\n`)
   const initialized = await readStatus(config, installation)
   const context = { status: initialized, device: installation, accountKey }
-  cryptoContexts.set(config.baseUrl, context)
+  cryptoContexts.set(configCacheKey(config), context)
   return context
 }
 
 async function cryptoContext(config: VaultConfig, allowBootstrap: boolean): Promise<CryptoContext> {
-  const cached = cryptoContexts.get(config.baseUrl)
+  const cacheKey = configCacheKey(config)
+  const cached = cryptoContexts.get(cacheKey)
   if (cached) return cached
-  const device = isOidc() ? null : await loadDeviceKey(new URL(config.baseUrl).origin)
-  const status = await readStatus(config, device)
-  if (!status.initialized) {
-    if (!allowBootstrap) return { status, device, accountKey: null }
-    return bootstrap(config, device)
+  const pending = pendingCryptoContexts.get(cacheKey)
+  if (pending) {
+    const context = await pending
+    return !context.status.initialized && allowBootstrap
+      ? bootstrapContext(config, context.device)
+      : context
   }
-  if (isOidc()) {
-    const context = { status, device: null, accountKey: null }
-    cryptoContexts.set(config.baseUrl, context)
+  const loading = (async () => {
+    const device = isOidc() ? null : await loadDeviceKey(new URL(config.baseUrl).origin)
+    const status = await readStatus(config, device)
+    if (!status.initialized) {
+      if (!allowBootstrap) return { status, device, accountKey: null }
+      return bootstrapContext(config, device)
+    }
+    if (isOidc()) {
+      const context = { status, device: null, accountKey: null }
+      cryptoContexts.set(cacheKey, context)
+      return context
+    }
+    if (!device || !status.client) {
+      throw new Error("This installation is not registered. Run cvlt recover after a fresh crcl login")
+    }
+    const accountKey = await unwrapAccountKeyForDevice(
+      status.client.wrapped_account_key,
+      device.privateKey,
+      status.account
+    )
+    const context = { status, device, accountKey }
+    cryptoContexts.set(cacheKey, context)
     return context
+  })()
+  pendingCryptoContexts.set(cacheKey, loading)
+  try {
+    return await loading
+  } finally {
+    pendingCryptoContexts.delete(cacheKey)
   }
-  if (!device || !status.client) {
-    throw new Error("This installation is not registered. Run cvlt recover after a fresh crcl login")
+}
+
+async function bootstrapContext(config: VaultConfig, device: DeviceKey | null): Promise<CryptoContext> {
+  const cacheKey = configCacheKey(config)
+  const cached = cryptoContexts.get(cacheKey)
+  if (cached) return cached
+  const pending = pendingBootstraps.get(cacheKey)
+  if (pending) return pending
+  const loading = bootstrap(config, device)
+  pendingBootstraps.set(cacheKey, loading)
+  try {
+    return await loading
+  } finally {
+    pendingBootstraps.delete(cacheKey)
   }
-  const accountKey = await unwrapAccountKeyForDevice(
-    status.client.wrapped_account_key,
-    device.privateKey,
-    status.account
-  )
-  const context = { status, device, accountKey }
-  cryptoContexts.set(config.baseUrl, context)
-  return context
 }
 
 async function kmsVaultKey(
@@ -273,23 +380,33 @@ async function vaultKey(
   row: VaultRow,
   fetchOidcToken: OidcTokenFetcher
 ): Promise<Uint8Array> {
-  const cacheKey = `${config.baseUrl}:${row.id}`
+  const cacheKey = vaultRowCacheKey(config, row.id)
   const cached = vaultKeys.get(cacheKey)
   if (cached) return cached
-  const context = await cryptoContext(config, false)
-  let key: Uint8Array
-  if (isOidc()) {
-    key = await kmsVaultKey(context, row, fetchOidcToken)
-  } else {
-    if (!context.accountKey || !row.wrapped_vault_key) throw new Error(`Vault ${row.id} has no account key envelope`)
-    key = await unwrapKey(
-      row.wrapped_vault_key,
-      context.accountKey,
-      `cvlt:v1:account:${context.status.account}:vault:${row.id}`
-    )
+  const pending = pendingVaultKeys.get(cacheKey)
+  if (pending) return pending
+  const loading = (async () => {
+    const context = await cryptoContext(config, false)
+    let key: Uint8Array
+    if (isOidc()) {
+      key = await kmsVaultKey(context, row, fetchOidcToken)
+    } else {
+      if (!context.accountKey || !row.wrapped_vault_key) throw new Error(`Vault ${row.id} has no account key envelope`)
+      key = await unwrapKey(
+        row.wrapped_vault_key,
+        context.accountKey,
+        `cvlt:v1:account:${context.status.account}:vault:${row.id}`
+      )
+    }
+    vaultKeys.set(cacheKey, key)
+    return key
+  })()
+  pendingVaultKeys.set(cacheKey, loading)
+  try {
+    return await loading
+  } finally {
+    pendingVaultKeys.delete(cacheKey)
   }
-  vaultKeys.set(cacheKey, key)
-  return key
 }
 
 async function encryptedVault(
@@ -319,11 +436,62 @@ async function encryptedVault(
 }
 
 async function vaultRows(config: VaultConfig): Promise<VaultRow[]> {
-  return jsonRequest<VaultRow[]>(config, "/v1/vaults")
+  const cacheKey = configCacheKey(config)
+  const cached = vaultRowLists.get(cacheKey)
+  if (cached) return cached
+  const loading = jsonRequest<VaultRow[]>(config, "/v1/vaults")
+    .then((rows) => rows.map((row) => rememberVaultRow(config, row)))
+  vaultRowLists.set(cacheKey, loading)
+  try {
+    return await loading
+  } catch (error) {
+    if (vaultRowLists.get(cacheKey) === loading) vaultRowLists.delete(cacheKey)
+    throw error
+  }
 }
 
 async function findVaultRow(config: VaultConfig, vaultId: string): Promise<VaultRow> {
-  return jsonRequest<VaultRow>(config, `/v1/vaults/${vaultId}`)
+  const cacheKey = vaultRowCacheKey(config, vaultId)
+  const cached = vaultRowsById.get(cacheKey)
+  if (cached) return cached
+  const pendingList = vaultRowLists.get(configCacheKey(config))
+  if (pendingList) {
+    await pendingList
+    const listed = vaultRowsById.get(cacheKey)
+    if (listed) return listed
+  }
+  return rememberVaultRow(config, await jsonRequest<VaultRow>(config, `/v1/vaults/${vaultId}`))
+}
+
+async function itemRows(config: VaultConfig, vaultId: string): Promise<ItemRow[]> {
+  const cacheKey = vaultRowCacheKey(config, vaultId)
+  const cached = itemRowLists.get(cacheKey)
+  if (cached) return cached
+  const loading = jsonRequest<ItemRow[]>(config, `/v1/vaults/${vaultId}/items`)
+    .then((rows) => rows.map((row) => rememberItemRow(config, row)))
+  itemRowLists.set(cacheKey, loading)
+  try {
+    return await loading
+  } catch (error) {
+    if (itemRowLists.get(cacheKey) === loading) itemRowLists.delete(cacheKey)
+    throw error
+  }
+}
+
+async function findItemRow(config: VaultConfig, vaultId: string, itemId: string): Promise<ItemRow> {
+  const cacheKey = itemRowCacheKey(config, vaultId, itemId)
+  const cached = itemRowsById.get(cacheKey)
+  if (cached) return cached
+  const pendingList = itemRowLists.get(vaultRowCacheKey(config, vaultId))
+  if (pendingList) {
+    await pendingList
+    const listed = itemRowsById.get(cacheKey)
+    if (listed) return listed
+  }
+  return rememberItemRow(
+    config,
+    await jsonRequest<ItemRow>(config, `/v1/vaults/${vaultId}/items/${itemId}`)
+  )
 }
 
 async function encryptedItem(
@@ -437,6 +605,9 @@ async function createItem(
       details: await encryptJson(payload.details, key, `cvlt:v1:vault:${vault.id}:item:${id}:details`),
     },
   })
+  rememberItemRow(config, row)
+  invalidateItemList(config, vault.id)
+  invalidateVaultRow(config, vault.id)
   return encryptedItem(config, row, vault, fetchOidcToken)
 }
 
@@ -459,6 +630,9 @@ async function updateItem(
       details: await encryptJson(payload.details, key, `cvlt:v1:vault:${vault.id}:item:${row.id}:details`),
     },
   })
+  rememberItemRow(config, updated)
+  invalidateItemList(config, vault.id)
+  invalidateVaultRow(config, vault.id)
   return encryptedItem(config, updated, vault, fetchOidcToken)
 }
 
@@ -599,7 +773,9 @@ async function createVault(
         : null,
     },
   })
-  vaultKeys.set(`${config.baseUrl}:${id}`, key)
+  rememberVaultRow(config, row)
+  invalidateVaultList(config)
+  vaultKeys.set(vaultRowCacheKey(config, id), key)
   return encryptedVault(config, row, async () => null)
 }
 
@@ -656,7 +832,8 @@ export async function handleApi<T>(
   const method = options.method || "GET"
   const parts = url.pathname.split("/").filter(Boolean)
   if (parts[0] !== "v1" || parts[1] !== "vaults") return { handled: false }
-  await cryptoContext(config, method !== "GET")
+  const resolvingItem = parts[3] === "items" && parts[4] === "resolve" && parts.length === 5 && method === "POST"
+  await cryptoContext(config, method !== "GET" && !resolvingItem)
 
   if (parts.length === 2) {
     if (method === "POST") {
@@ -675,6 +852,7 @@ export async function handleApi<T>(
   if (parts.length === 3) {
     if (method === "DELETE") {
       await jsonRequest(config, `/v1/vaults/${vaultId}`, { method: "DELETE" })
+      removeVaultRow(config, vaultId)
       return { handled: true, value: undefined as T }
     }
     if (method === "PUT") {
@@ -699,6 +877,8 @@ export async function handleApi<T>(
           ),
         },
       })
+      rememberVaultRow(config, row)
+      invalidateVaultList(config)
       return { handled: true, value: await encryptedVault(config, row, fetchOidcToken) as T }
     }
     return { handled: true, value: await encryptedVault(config, vault, fetchOidcToken) as T }
@@ -712,9 +892,22 @@ export async function handleApi<T>(
         value: await createItem(config, vault, options.body as Record<string, unknown>, fetchOidcToken) as T,
       }
     }
-    const rows = await jsonRequest<ItemRow[]>(config, `/v1/vaults/${vaultId}/items`)
+    const rows = await itemRows(config, vaultId)
     const items = await Promise.all(rows.map((row) => encryptedItem(config, row, vault, fetchOidcToken)))
     return { handled: true, value: filterItems(items, url.searchParams) as T }
+  }
+
+  if (parts[4] === "resolve" && parts.length === 5 && method === "POST") {
+    const title = (options.body as Record<string, unknown> | undefined)?.title
+    if (typeof title !== "string" || title.length === 0) throw new Error("Item title is required")
+    const row = rememberItemRow(
+      config,
+      await jsonRequest<ItemRow>(config, `/v1/vaults/${vaultId}/items/resolve`, {
+        method: "POST",
+        body: { locator: await itemLocator(await vaultKey(config, vault, fetchOidcToken), title) },
+      })
+    )
+    return { handled: true, value: await encryptedItem(config, row, vault, fetchOidcToken) as T }
   }
 
   const itemId = parts[4]!
@@ -729,7 +922,7 @@ export async function handleApi<T>(
     return { handled: false }
   }
 
-  const row = await jsonRequest<ItemRow>(config, `/v1/vaults/${vaultId}/items/${itemId}`)
+  const row = await findItemRow(config, vaultId, itemId)
   if (parts[5] === "move" && method === "POST") {
     const destinationId = String((options.body as Record<string, unknown>).vault)
     const destination = await findVaultRow(config, destinationId)
@@ -751,10 +944,14 @@ export async function handleApi<T>(
       )
     }
     await jsonRequest(config, `/v1/vaults/${vaultId}/items/${itemId}`, { method: "DELETE" })
+    removeItemRow(config, vaultId, itemId)
+    invalidateVaultRow(config, vaultId)
     return { handled: true, value: created as T }
   }
   if (method === "DELETE") {
     await jsonRequest(config, `/v1/vaults/${vaultId}/items/${itemId}`, { method: "DELETE" })
+    removeItemRow(config, vaultId, itemId)
+    invalidateVaultRow(config, vaultId)
     return { handled: true, value: undefined as T }
   }
   if (method === "PUT") {
@@ -777,7 +974,7 @@ export async function e2eeDoctor(config: VaultConfig): Promise<{
   const rows = await vaultRows(config)
   let items = 0
   for (const row of rows) {
-    items += (await jsonRequest<ItemRow[]>(config, `/v1/vaults/${row.id}/items`)).length
+    items += (await itemRows(config, row.id)).length
   }
   return {
     initialized: context.status.initialized,

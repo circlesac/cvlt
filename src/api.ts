@@ -245,6 +245,7 @@ async function request<T = unknown>(
 
 /** Resolve vault by name or ID */
 export async function resolveVault(nameOrId: string): Promise<string> {
+  if (/^[0-9a-hjkmnp-tv-z]{26}$/.test(nameOrId)) return nameOrId
   type Vault = { id: string; name: string }
   const vaults = await api<Vault[]>("/v1/vaults")
   const match = vaults.find(
@@ -262,13 +263,12 @@ export async function resolveItem(
   vaultId: string,
   nameOrId: string
 ): Promise<string> {
-  type Item = { id: string; title: string }
-  const items = await api<Item[]>(`/v1/vaults/${vaultId}/items`)
-  const match = items.find((item) => item.id === nameOrId || item.title === nameOrId)
-  if (match) return match.id
-
-  console.error(`[ERROR] Item "${nameOrId}" not found in vault`)
-  process.exit(1)
+  if (/^[0-9a-hjkmnp-tv-z]{26}$/.test(nameOrId)) return nameOrId
+  const item = await api<{ id: string }>(`/v1/vaults/${vaultId}/items/resolve`, {
+    method: "POST",
+    body: { title: nameOrId },
+  })
+  return item.id
 }
 
 export async function uploadFile(

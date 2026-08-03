@@ -109,12 +109,13 @@ export type Resolver = (ref: string) => Promise<string>
 /** Replace every {{op://...}} / {{vlt://...}} template reference. */
 export async function injectTemplate(template: string, resolve: Resolver): Promise<string> {
   const refs = [...template.matchAll(/\{\{((?:op|vlt):\/\/[^}]+)\}\}/g)]
-  let result = template
-  for (const match of refs) {
-    const value = await resolve(match[1]!)
-    result = result.replace(match[0]!, value)
-  }
-  return result
+  const values = new Map(await Promise.all(
+    [...new Set(refs.map((match) => match[1]!))].map(async (ref) => [ref, await resolve(ref)] as const)
+  ))
+  return template.replace(
+    /\{\{((?:op|vlt):\/\/[^}]+)\}\}/g,
+    (_match, ref: string) => values.get(ref)!
+  )
 }
 
 /** Parse an env file (KEY=value lines; #-comments and blanks skipped).
@@ -138,16 +139,18 @@ export async function buildRunEnv(
   envFileContent: string | null,
   resolve: Resolver
 ): Promise<Record<string, string | undefined>> {
-  const env = { ...parentEnv }
-  if (envFileContent !== null) {
-    for (const [key, value] of Object.entries(parseEnvFile(envFileContent))) {
-      env[key] = isSecretRef(value) ? await resolve(value) : value
-    }
+  const env = {
+    ...parentEnv,
+    ...(envFileContent === null ? {} : parseEnvFile(envFileContent)),
   }
+  const refs = [...new Set(Object.values(env).filter(
+    (value): value is string => !!value && isSecretRef(value)
+  ))]
+  const values = new Map(await Promise.all(
+    refs.map(async (ref) => [ref, await resolve(ref)] as const)
+  ))
   for (const [key, value] of Object.entries(env)) {
-    if (value && isSecretRef(value)) {
-      env[key] = await resolve(value)
-    }
+    if (value && isSecretRef(value)) env[key] = values.get(value)!
   }
   return env
 }
