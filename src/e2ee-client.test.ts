@@ -142,3 +142,74 @@ describe("E2EE request cache", () => {
     expect(resolveRequest.body).not.toContain("Database")
   })
 })
+
+describe("mixed plain content", () => {
+  it("lists and reveals a plain integration item without local E2EE state", async () => {
+    const requests: string[] = []
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      const url = String(input)
+      requests.push(url)
+      if (url === "https://vault.example/v1/vaults") {
+        return Response.json([{
+          id: vaultId,
+          name: "prism-dev.circles.ac",
+          type: "SERVICE_MANAGED",
+          content_mode: "plain",
+          integration_coordinate: "prism-dev.circles.ac",
+          attribute_version: 1,
+          content_version: 1,
+          items: 1,
+          created_at: "2026-08-06T00:00:00Z",
+          updated_at: "2026-08-06T00:00:00Z",
+          kms_wrapped_vault_key: null,
+        }])
+      }
+      if (url === `https://vault.example/v1/vaults/${vaultId}/items`) {
+        return Response.json([{
+          id: itemId,
+          vault_id: vaultId,
+          version: 1,
+          content_mode: "plain",
+          title: "ChatGPT — person@example.com",
+          category: "API_CREDENTIAL",
+          tags: ["prism", "provider:chatgpt", "account:account-1"],
+          created_at: "2026-08-06T00:00:00Z",
+          updated_at: "2026-08-06T00:00:00Z",
+        }])
+      }
+      if (url === `https://vault.example/v1/vaults/${vaultId}/items/${itemId}`) {
+        return Response.json({
+          id: itemId,
+          vault_id: vaultId,
+          version: 1,
+          content_mode: "plain",
+          title: "ChatGPT — person@example.com",
+          category: "API_CREDENTIAL",
+          fields: [{ id: "credential", value: "secret" }],
+          created_at: "2026-08-06T00:00:00Z",
+          updated_at: "2026-08-06T00:00:00Z",
+        })
+      }
+      return Response.json({ status: 404 }, { status: 404 })
+    }) as unknown as typeof fetch
+
+    const config = { baseUrl: "https://vault.example", token: "caller", org: null }
+    const vaults = await handleApi<Record<string, unknown>[]>(config, "/v1/vaults", {}, async () => null)
+    expect(vaults.value).toEqual([expect.objectContaining({ name: "prism-dev.circles.ac" })])
+    const items = await handleApi<Record<string, unknown>[]>(
+      config,
+      `/v1/vaults/${vaultId}/items`,
+      {},
+      async () => null
+    )
+    expect(items.value).toEqual([expect.objectContaining({ title: "ChatGPT — person@example.com" })])
+    const item = await handleApi<Record<string, unknown>>(
+      config,
+      `/v1/vaults/${vaultId}/items/${itemId}`,
+      {},
+      async () => null
+    )
+    expect(item.value).toMatchObject({ fields: [{ id: "credential", value: "secret" }] })
+    expect(requests.some((url) => url.endsWith("/v1/status"))).toBe(false)
+  })
+})

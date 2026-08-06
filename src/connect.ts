@@ -46,9 +46,14 @@ type VaultRow = {
   created_at: string
   updated_at: string
   items: number
-  format_version: number
-  overview: ContentEnvelope
-  wrapped_vault_key: AesEnvelope | null
+  content_mode?: "e2ee" | "plain"
+  integration_coordinate?: string | null
+  name?: string
+  description?: string
+  type?: string
+  format_version?: number | null
+  overview?: ContentEnvelope
+  wrapped_vault_key?: AesEnvelope | null
   kms_wrapped_vault_key: RsaEnvelope | null
 }
 
@@ -58,10 +63,18 @@ type ItemRow = {
   version: number
   created_at: string
   updated_at: string
-  format_version: number
-  locator: string
-  overview: ContentEnvelope
-  details: ContentEnvelope
+  content_mode?: "e2ee" | "plain"
+  format_version?: number | null
+  locator?: string | null
+  overview?: ContentEnvelope
+  details?: ContentEnvelope
+  title?: string
+  category?: string
+  tags?: string[]
+  fields?: Record<string, unknown>[]
+  sections?: Record<string, unknown>[]
+  urls?: { href: string; primary?: boolean }[]
+  [key: string]: unknown
 }
 
 type VaultOverview = {
@@ -316,6 +329,8 @@ export function createConnectClient(options: ConnectClientOptions): VaultFetcher
   }
 
   async function vaultValue(request: Request, prefix: string, row: VaultRow): Promise<Record<string, unknown>> {
+    if (row.content_mode === "plain") return { ...row }
+    if (!row.overview) throw new Error(`Vault ${row.id} has no encrypted overview`)
     const overview = await decryptJson<VaultOverview>(
       row.overview,
       await vaultKey(request, prefix, row),
@@ -332,6 +347,7 @@ export function createConnectClient(options: ConnectClientOptions): VaultFetcher
       updated_at: row.updated_at,
       ...(overview.description ? { description: overview.description } : {}),
       ...(overview.password_rotation_days != null ? { password_rotation_days: overview.password_rotation_days } : {}),
+      ...(row.integration_coordinate ? { integration_coordinate: row.integration_coordinate } : {}),
     }
   }
 
@@ -341,6 +357,11 @@ export function createConnectClient(options: ConnectClientOptions): VaultFetcher
     row: ItemRow,
     vault: VaultRow
   ): Promise<Record<string, unknown>> {
+    if (row.content_mode === "plain") {
+      const vaultOverview = await vaultValue(request, prefix, vault)
+      return { ...row, vault: { id: row.vault_id, name: vaultOverview.name } }
+    }
+    if (!row.overview || !row.details) throw new Error(`Item ${row.id} has incomplete encrypted data`)
     const key = await vaultKey(request, prefix, vault)
     const overview = await decryptJson<ItemOverview>(
       row.overview,
@@ -401,11 +422,50 @@ export function createConnectClient(options: ConnectClientOptions): VaultFetcher
         if (parts.length === 2 && request.method === "GET") {
           return jsonResponse(await vaultValue(request, target.prefix, vault))
         }
+        if (parts.length === 2 && request.method === "PUT") {
+          if (vault.content_mode === "plain") return upstream.fetch(request)
+          const current = await vaultValue(request, target.prefix, vault)
+          const body = await request.json() as Record<string, unknown>
+          const overview: VaultOverview = {
+            name: String(body.name ?? current.name),
+            description: String(body.description ?? current.description ?? ""),
+            type: String(current.type ?? "USER_CREATED"),
+            ...(body.password_rotation_days !== undefined
+              ? { password_rotation_days: body.password_rotation_days as number | null }
+              : current.password_rotation_days !== undefined
+                ? { password_rotation_days: current.password_rotation_days as number }
+                : {}),
+          }
+          const { data: updated } = await rawJson<VaultRow>(request, `${target.prefix}/vaults/${encodeURIComponent(vaultId)}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              overview: await encryptJson(
+                overview,
+                await vaultKey(request, target.prefix, vault),
+                `cvlt:v1:vault:${vaultId}:overview`
+              ),
+            }),
+          })
+          return jsonResponse(await vaultValue(request, target.prefix, updated))
+        }
         if (parts[2] !== "items") return upstream.fetch(request)
         if (parts.length === 3 && request.method === "GET") {
           const { data } = await rawJson<ItemRow[]>(request, `${target.prefix}/vaults/${encodeURIComponent(vaultId)}/items`)
           const items = await Promise.all(data.map((row) => itemValue(request, target.prefix, row, vault)))
           return jsonResponse(filterItems(items, url.searchParams))
+        }
+
+        if (parts[3] === "resolve" && parts.length === 4 && request.method === "POST") {
+          const body = await request.json() as Record<string, unknown>
+          if (typeof body.title !== "string" || body.title.length === 0) {
+            return jsonResponse({ status: 400, message: "Item title is required" }, 400)
+          }
+          const { data } = await rawJson<ItemRow[]>(request, `${target.prefix}/vaults/${encodeURIComponent(vaultId)}/items`)
+          for (const row of data) {
+            const item = await itemValue(request, target.prefix, row, vault)
+            if (item.title === body.title) return jsonResponse(item)
+          }
+          return jsonResponse({ status: 404, message: "Item not found" }, 404)
         }
 
         const itemId = parts[3]
@@ -416,6 +476,7 @@ export function createConnectClient(options: ConnectClientOptions): VaultFetcher
           return jsonResponse(await itemValue(request, target.prefix, row, vault), 200, { ETag: `"${row.version}"` })
         }
         if (request.method === "PUT") {
+          if (row.content_mode === "plain") return upstream.fetch(request)
           const ifMatch = request.headers.get("If-Match")?.replace(/^W\//, "").replaceAll('"', "")
           const expectedVersion = ifMatch === undefined ? row.version : Number(ifMatch)
           if (!Number.isSafeInteger(expectedVersion) || expectedVersion !== row.version) {

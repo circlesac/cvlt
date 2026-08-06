@@ -57,9 +57,14 @@ type VaultRow = {
   created_at: string
   updated_at: string
   items: number
-  format_version: number
-  overview: ContentEnvelope
-  wrapped_vault_key: AesEnvelope
+  content_mode?: "e2ee" | "plain"
+  integration_coordinate?: string | null
+  name?: string
+  description?: string
+  type?: string
+  format_version?: number | null
+  overview?: ContentEnvelope
+  wrapped_vault_key?: AesEnvelope | null
   kms_wrapped_vault_key: RsaEnvelope | null
   coordinate: { provider: string; owner: string; repository: string | null } | null
 }
@@ -70,10 +75,18 @@ type ItemRow = {
   version: number
   created_at: string
   updated_at: string
-  format_version: number
-  locator: string
-  overview: ContentEnvelope
-  details: ContentEnvelope
+  content_mode?: "e2ee" | "plain"
+  format_version?: number | null
+  locator?: string | null
+  overview?: ContentEnvelope
+  details?: ContentEnvelope
+  title?: string
+  category?: string
+  tags?: string[]
+  fields?: Record<string, unknown>[]
+  sections?: Record<string, unknown>[]
+  urls?: { href: string; primary?: boolean }[]
+  [key: string]: unknown
 }
 
 type FileRow = {
@@ -414,6 +427,7 @@ async function encryptedVault(
   row: VaultRow,
   fetchOidcToken: OidcTokenFetcher
 ): Promise<Record<string, unknown>> {
+  if (row.content_mode === "plain") return { ...row }
   if (!row.overview) throw new Error(`Vault ${row.id} has no encrypted overview`)
   const overview = await decryptJson<VaultOverview>(
     row.overview,
@@ -481,12 +495,12 @@ async function itemRows(config: VaultConfig, vaultId: string): Promise<ItemRow[]
 async function findItemRow(config: VaultConfig, vaultId: string, itemId: string): Promise<ItemRow> {
   const cacheKey = itemRowCacheKey(config, vaultId, itemId)
   const cached = itemRowsById.get(cacheKey)
-  if (cached) return cached
+  if (cached && (cached.content_mode !== "plain" || cached.fields !== undefined)) return cached
   const pendingList = itemRowLists.get(vaultRowCacheKey(config, vaultId))
   if (pendingList) {
     await pendingList
     const listed = itemRowsById.get(cacheKey)
-    if (listed) return listed
+    if (listed && (listed.content_mode !== "plain" || listed.fields !== undefined)) return listed
   }
   return rememberItemRow(
     config,
@@ -500,6 +514,7 @@ async function encryptedItem(
   vault: VaultRow,
   fetchOidcToken: OidcTokenFetcher
 ): Promise<Record<string, unknown>> {
+  if (row.content_mode === "plain") return { ...row, vault: { id: row.vault_id } }
   if (!row.overview || !row.details) throw new Error(`Item ${row.id} has incomplete encrypted data`)
   const key = await vaultKey(config, vault, fetchOidcToken)
   const overview = await decryptJson<ItemOverview>(
@@ -594,6 +609,12 @@ async function createItem(
   fetchOidcToken: OidcTokenFetcher,
   id = generateOpaqueId()
 ): Promise<Record<string, unknown>> {
+  if (vault.content_mode === "plain") {
+    return jsonRequest<Record<string, unknown>>(config, `/v1/vaults/${vault.id}/items`, {
+      method: "POST",
+      body: { ...body, id, content_mode: "plain" },
+    })
+  }
   const key = await vaultKey(config, vault, fetchOidcToken)
   const payload = itemPayload(body)
   const row = await jsonRequest<ItemRow>(config, `/v1/vaults/${vault.id}/items`, {
@@ -618,6 +639,12 @@ async function updateItem(
   body: Record<string, unknown>,
   fetchOidcToken: OidcTokenFetcher
 ): Promise<Record<string, unknown>> {
+  if (row.content_mode === "plain") {
+    return jsonRequest<Record<string, unknown>>(config, `/v1/vaults/${vault.id}/items/${row.id}`, {
+      method: "PUT",
+      body: { ...body, version: row.version },
+    })
+  }
   const current = await encryptedItem(config, row, vault, fetchOidcToken)
   const key = await vaultKey(config, vault, fetchOidcToken)
   const payload = itemPayload(body, current)
@@ -833,7 +860,6 @@ export async function handleApi<T>(
   const parts = url.pathname.split("/").filter(Boolean)
   if (parts[0] !== "v1" || parts[1] !== "vaults") return { handled: false }
   const resolvingItem = parts[3] === "items" && parts[4] === "resolve" && parts.length === 5 && method === "POST"
-  await cryptoContext(config, method !== "GET" && !resolvingItem)
 
   if (parts.length === 2) {
     if (method === "POST") {
@@ -856,6 +882,15 @@ export async function handleApi<T>(
       return { handled: true, value: undefined as T }
     }
     if (method === "PUT") {
+      if (vault.content_mode === "plain") {
+        return {
+          handled: true,
+          value: await jsonRequest<T>(config, `/v1/vaults/${vaultId}`, {
+            method: "PUT",
+            body: options.body,
+          }),
+        }
+      }
       const current = await encryptedVault(config, vault, fetchOidcToken)
       const overview: VaultOverview = {
         name: String((options.body as Record<string, unknown>).name ?? current.name),
@@ -900,13 +935,24 @@ export async function handleApi<T>(
   if (parts[4] === "resolve" && parts.length === 5 && method === "POST") {
     const title = (options.body as Record<string, unknown> | undefined)?.title
     if (typeof title !== "string" || title.length === 0) throw new Error("Item title is required")
-    const row = rememberItemRow(
-      config,
-      await jsonRequest<ItemRow>(config, `/v1/vaults/${vaultId}/items/resolve`, {
+    let row: ItemRow
+    try {
+      row = await jsonRequest<ItemRow>(config, `/v1/vaults/${vaultId}/items/resolve`, {
         method: "POST",
-        body: { locator: await itemLocator(await vaultKey(config, vault, fetchOidcToken), title) },
+        body: vault.content_mode === "plain"
+          ? { title }
+          : { locator: await itemLocator(await vaultKey(config, vault, fetchOidcToken), title) },
       })
-    )
+    } catch (error) {
+      if (!(error instanceof VaultApiError) || error.status !== 404 || vault.content_mode === "plain") throw error
+      const matches = await Promise.all((await itemRows(config, vaultId)).map(
+        (candidate) => encryptedItem(config, candidate, vault, fetchOidcToken)
+      ))
+      const match = matches.find((candidate) => candidate.title === title)
+      if (!match) throw error
+      row = await findItemRow(config, vaultId, String(match.id))
+    }
+    rememberItemRow(config, row)
     return { handled: true, value: await encryptedItem(config, row, vault, fetchOidcToken) as T }
   }
 

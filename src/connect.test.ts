@@ -228,4 +228,64 @@ describe("Connect-compatible E2EE client", () => {
     expect(stale.status).toBe(412)
     expect(upstreamRequests.filter((request) => request.method === "PUT")).toHaveLength(1)
   })
+
+  it("passes plain integration vaults and items through without a Vault key", async () => {
+    let unwrapCalls = 0
+    const plainVault = {
+      id: vaultId,
+      name: "prism-dev.circles.ac",
+      type: "SERVICE_MANAGED",
+      content_mode: "plain",
+      integration_coordinate: "prism-dev.circles.ac",
+      attribute_version: 1,
+      content_version: 1,
+      items: 1,
+      created_at: "2026-08-06T00:00:00Z",
+      updated_at: "2026-08-06T00:00:00Z",
+      kms_wrapped_vault_key: null,
+    }
+    const plainItem = {
+      id: itemId,
+      vault_id: vaultId,
+      version: 1,
+      content_mode: "plain",
+      title: "ChatGPT — person@example.com",
+      category: "API_CREDENTIAL",
+      tags: ["prism", "provider:chatgpt", "account:account-1"],
+      fields: [{ id: "credential", value: "secret" }],
+      created_at: "2026-08-06T00:00:00Z",
+      updated_at: "2026-08-06T00:00:00Z",
+    }
+    const fetcher = {
+      async fetch(input: Request | string | URL) {
+        const request = input instanceof Request ? input : new Request(input)
+        const path = new URL(request.url).pathname
+        if (path === "/v1/vaults") return Response.json([plainVault])
+        if (path === `/v1/vaults/${vaultId}`) return Response.json(plainVault)
+        if (path === `/v1/vaults/${vaultId}/items`) {
+          return Response.json([{ ...plainItem, fields: undefined }])
+        }
+        if (path === `/v1/vaults/${vaultId}/items/${itemId}`) return Response.json(plainItem)
+        return Response.json({ status: 404 }, { status: 404 })
+      },
+    }
+    const connect = createConnectClient({
+      fetcher,
+      unwrapVaultKey: async () => {
+        unwrapCalls++
+        throw new Error("plain content must not unwrap a key")
+      },
+    })
+
+    expect(await (await connect.fetch("https://local/v1/vaults")).json()).toEqual([
+      expect.objectContaining({ name: "prism-dev.circles.ac", content_mode: "plain" }),
+    ])
+    expect(await (await connect.fetch(`https://local/v1/vaults/${vaultId}/items`)).json()).toEqual([
+      expect.objectContaining({ id: itemId, title: "ChatGPT — person@example.com" }),
+    ])
+    expect(await (await connect.fetch(`https://local/v1/vaults/${vaultId}/items/${itemId}`)).json()).toMatchObject({
+      fields: [{ id: "credential", value: "secret" }],
+    })
+    expect(unwrapCalls).toBe(0)
+  })
 })

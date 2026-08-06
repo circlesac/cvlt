@@ -123,7 +123,7 @@ cvlt document get "TLS Cert" --vault prod-secrets -o ./cert.pem
 
 ### Client encryption and recovery
 
-All vault content is encrypted locally before upload. The server stores only opaque ciphertext, wrapped keys, keyed locators, and control-plane metadata; there is no plaintext compatibility path.
+Ordinary Vault content is encrypted locally before upload. The server stores opaque ciphertext, wrapped keys, keyed locators, and control-plane metadata for those records. A reserved service-integration Vault may also contain explicitly marked application-readable items; `cvlt` can list and reveal them, while the server rejects public mutation of that Vault and its items.
 
 ```bash
 cvlt doctor # account encryption, installation key, and GitHub OIDC KMS state
