@@ -1,0 +1,37 @@
+{
+  "name": "@circlesac/vault",
+  "description": "Node.js SDK for Circles Vault",
+  "type": "module",
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./connect": {
+      "bun": "./src/connect.ts",
+      "types": "./dist/connect.d.ts",
+      "import": "./dist/connect.js"
+    },
+    "./cli": {
+      "bun": "./src/cli.ts",
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build src/index.ts --target=node --format=esm --outfile=dist/index.js && bun build src/cli.ts --target=node --format=esm --outfile=dist/cli.js && tsc -p ../tsconfig.client.json && tsc -p ../tsconfig.connect.json && tsc -p ../tsconfig.cli.json",
+    "test": "bun test src/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/circlesac/vault.git",
+    "directory": "node"
+  },
+  "dependencies": {
+    "@circlesac/credentials": "^1.2.0"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "key": "qwPSuOPS1jSMuRNnGou33V4E0MurEZKzDOvk_IE8mQA",
+  "context": "cvlt:v1:test:fixture",
+  "plaintext": "cross-language-vault-fixture",
+  "envelope": {
+    "version": 1,
+    "algorithm": "A256GCM",
+    "nonce": "TNHg1OEdVJV3Z1g_",
+    "ciphertext": "QueUMZwUD01oKJblZxw9YOJBpYjOAh-jq8EU-aoMYd-LnVMlxAJmvJiwmuU",
+    "wrapped_key": {
+      "version": 1,
+      "algorithm": "A256GCM",
+      "nonce": "EktMIaT88goMgzvQ",
+      "ciphertext": "biy9faOWpoUhAUBVPrz1vThOHBRtaGeKG3eADdHry6Bp30sanEjhULi9Y-4xTweC"
+    }
+  }
+}

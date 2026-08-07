@@ -1,0 +1,11 @@
+{
+  "valid": [
+    {"input":"op://personal/Modusign/password","scheme":"op","vault":"personal","item":"Modusign","field":"password"},
+    {"input":"vlt://github.com/CirclesAC/Modusign/API_TOKEN","scheme":"cvlt","provider":"github.com","owner":"circlesac","repo":"modusign","name":"API_TOKEN"}
+  ],
+  "invalid": [
+    "op://personal/Modusign",
+    "vlt://github.com/circlesac/lowercase",
+    "vlt://gitlab.com/circlesac/API_TOKEN"
+  ]
+}

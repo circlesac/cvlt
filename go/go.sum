@@ -1,0 +1,4 @@
+github.com/circlesac/credentials/go v1.2.2 h1:sDEjuf0s8y9F37VCkweHC2J8BHDDQsHa59E9XGz0b9c=
+github.com/circlesac/credentials/go v1.2.2/go.mod h1:AfWGehoQtkKnIsAp5OrVV0jXes40dCDEjvfETadeYUQ=
+golang.org/x/text v0.28.0 h1:rhazDwis8INMIwQ4tpjLDzUhx6RlXqZNPEM0huQojng=
+golang.org/x/text v0.28.0/go.mod h1:U8nCwOR8jO/marOQ0QbDiOngZVEBB7MAiitBuMjXiNU=

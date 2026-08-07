@@ -1,0 +1,239 @@
+name: Release
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate version
+        id: bump
+        run: |
+          VERSION=$(npx --yes @circlesac/oneup version --source git --target cli/package.json --target node/package.json | tail -1)
+          node -e 'const fs=require("node:fs"); const cli=JSON.parse(fs.readFileSync("cli/package.json")); const sdk=JSON.parse(fs.readFileSync("node/package.json")); cli.dependencies["@circlesac/vault"]=sdk.version; fs.writeFileSync("cli/package.json", JSON.stringify(cli, null, 2)+"\n")'
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: versioned-files
+          path: |
+            cli/package.json
+            node/package.json
+
+  build:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            bun_target: bun-darwin-arm64
+            name: cvlt-darwin-arm64
+          - os: macos-latest
+            bun_target: bun-darwin-x64
+            name: cvlt-darwin-amd64
+          - os: ubuntu-latest
+            bun_target: bun-linux-x64
+            name: cvlt-linux-amd64
+          - os: ubuntu-latest
+            bun_target: bun-linux-arm64
+            name: cvlt-linux-arm64
+          - os: windows-latest
+            bun_target: bun-windows-x64
+            name: cvlt-windows-amd64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: versioned-files
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install
+
+      - name: Install Linux Secret Service
+        if: matrix.bun_target == 'bun-linux-x64'
+        run: sudo apt-get update && sudo apt-get install -y dbus-x11 gnome-keyring libsecret-tools
+
+      - name: Test macOS key store
+        if: matrix.bun_target == 'bun-darwin-arm64'
+        env:
+          CVLT_TEST_OS_KEYSTORE: "1"
+        run: bun test node/src/ cli/src/
+
+      - name: Test Windows key store
+        if: matrix.bun_target == 'bun-windows-x64'
+        env:
+          CVLT_TEST_OS_KEYSTORE: "1"
+        run: bun test node/src/ cli/src/
+
+      - name: Test Linux key store
+        if: matrix.bun_target == 'bun-linux-x64'
+        run: |
+          dbus-run-session -- bash -lc '
+            printf "%s" "test-keyring-password" | gnome-keyring-daemon --unlock >/dev/null
+            export CVLT_TEST_OS_KEYSTORE=1
+            bun test node/src/ cli/src/
+          '
+
+      - name: Build
+        run: bun build --compile --target=${{ matrix.bun_target }} cli/src/index.ts --outfile cvlt
+
+      - name: Re-sign darwin binary
+        if: startsWith(matrix.bun_target, 'bun-darwin')
+        run: |
+          codesign --remove-signature cvlt
+          codesign --force --deep -s - cvlt
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: tar czf ${{ matrix.name }}.tar.gz cvlt
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: 7z a ${{ matrix.name }}.zip cvlt.exe
+        shell: bash
+
+      - name: Package Debian artifact
+        if: startsWith(matrix.bun_target, 'bun-linux')
+        run: |
+          case "${{ matrix.bun_target }}" in
+            bun-linux-x64) arch=amd64 ;;
+            bun-linux-arm64) arch=arm64 ;;
+            *) exit 1 ;;
+          esac
+          ./packaging/build-deb.sh "cvlt" "${{ needs.version.outputs.version }}" "$arch" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}.*
+            cvlt_*.deb
+
+  github-release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.deb
+            cli/bin/install.sh
+
+  publish-sdk:
+    needs: [version, github-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          registry-url: https://registry.npmjs.org
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: versioned-files
+
+      - run: npm install --ignore-scripts
+      - run: npm run build:sdk
+      - run: npm publish --workspace=@circlesac/vault
+
+  publish-cli:
+    needs: [version, github-release, publish-sdk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: versioned-files
+
+      - run: npm publish --workspace=@circlesac/vlt-cli
+
+  publish-package-indexes:
+    needs: [version, github-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Update Homebrew and APT indexes
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          SHA_DARWIN_ARM64=$(shasum -a 256 artifacts/cvlt-darwin-arm64/*.tar.gz | cut -d' ' -f1)
+          SHA_DARWIN_AMD64=$(shasum -a 256 artifacts/cvlt-darwin-amd64/*.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM64=$(shasum -a 256 artifacts/cvlt-linux-arm64/*.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_AMD64=$(shasum -a 256 artifacts/cvlt-linux-amd64/*.tar.gz | cut -d' ' -f1)
+
+          git clone https://x-access-token:${GH_TOKEN}@github.com/circlesac/homebrew-tap.git
+          cd homebrew-tap
+
+          cp ../homebrew/cvlt.rb.template Formula/cvlt.rb
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" Formula/cvlt.rb
+          sed -i "s/SHA_DARWIN_ARM64/${SHA_DARWIN_ARM64}/g" Formula/cvlt.rb
+          sed -i "s/SHA_DARWIN_AMD64/${SHA_DARWIN_AMD64}/g" Formula/cvlt.rb
+          sed -i "s/SHA_LINUX_ARM64/${SHA_LINUX_ARM64}/g" Formula/cvlt.rb
+          sed -i "s/SHA_LINUX_AMD64/${SHA_LINUX_AMD64}/g" Formula/cvlt.rb
+
+
+          mapfile -t packages < <(find ../artifacts -type f -name 'cvlt_*.deb' | sort)
+          test "${#packages[@]}" -eq 2
+          for package in "${packages[@]}"; do
+            ./apt/scripts/add-package.sh "$package" circlesac/vault "v${VERSION}"
+          done
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git rm -f Formula/vlt.rb 2>/dev/null || true
+          git add Formula/cvlt.rb "apt/manifests/cvlt/${VERSION}"
+          git diff --cached --quiet && exit 0
+          git commit -m "Update cvlt to ${VERSION}"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main
+            if git push origin main; then
+              exit 0
+            fi
+            printf 'push attempt %s failed\n' "$attempt" >&2
+          done
+          exit 1

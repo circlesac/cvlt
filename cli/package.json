@@ -1,0 +1,29 @@
+{
+  "name": "@circlesac/vlt-cli",
+  "description": "1Password-style secrets CLI for Circles Vault",
+  "type": "module",
+  "bin": {
+    "cvlt": "bin/cvlt.mjs"
+  },
+  "exports": {
+    "./client": "./client.js",
+    "./connect": "./connect.js"
+  },
+  "files": [
+    "bin",
+    "client.js",
+    "connect.js"
+  ],
+  "scripts": {
+    "postinstall": "node bin/install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/circlesac/vault.git",
+    "directory": "cli"
+  },
+  "dependencies": {
+    "@circlesac/vault": "*",
+    "citty": "^0.2.1"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@circlesac/vault-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "node",
+    "cli"
+  ],
+  "scripts": {
+    "build": "bun build --compile cli/src/index.ts --outfile cvlt",
+    "build:sdk": "npm run build --workspace=@circlesac/vault",
+    "dev": "bun run cli/src/index.ts",
+    "test": "bun test node/src/ cli/src/"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}
